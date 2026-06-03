@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1050" viewBox="0 0 1600 1050" role="img" aria-labelledby="title desc">
+  <title id="title">GenericAgent project architecture</title>
+  <desc id="desc">Layered architecture diagram for GenericAgent, showing frontends, runtime, LLM adapter, tools, memory, long-running modes, plugins, logs, and external systems.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .title { font: 700 34px "Segoe UI", Arial, sans-serif; fill: #111827; }
+      .subtitle { font: 400 16px "Segoe UI", Arial, sans-serif; fill: #4b5563; }
+      .layer-label { font: 700 18px "Segoe UI", Arial, sans-serif; fill: #111827; }
+      .box-title { font: 700 17px "Segoe UI", Arial, sans-serif; fill: #111827; }
+      .box-text { font: 400 13px "Segoe UI", Arial, sans-serif; fill: #374151; }
+      .small { font: 400 12px "Segoe UI", Arial, sans-serif; fill: #4b5563; }
+      .mono { font: 400 12px "Cascadia Mono", Consolas, monospace; fill: #374151; }
+      .card { fill: #ffffff; stroke: #d1d5db; stroke-width: 1.3; rx: 10; }
+      .runtime { fill: #eef6ff; stroke: #60a5fa; }
+      .llm { fill: #f1f8f3; stroke: #34a853; }
+      .tools { fill: #fff7ed; stroke: #f97316; }
+      .memory { fill: #f7f2ff; stroke: #8b5cf6; }
+      .frontend { fill: #f0fdfa; stroke: #14b8a6; }
+      .ops { fill: #fef2f2; stroke: #ef4444; }
+      .external { fill: #f9fafb; stroke: #9ca3af; }
+      .note { fill: #fff; stroke: #e5e7eb; stroke-dasharray: 5 4; }
+      .arrow { fill: none; stroke: #334155; stroke-width: 2.1; marker-end: url(#arrow); }
+      .arrow-soft { fill: none; stroke: #64748b; stroke-width: 1.7; marker-end: url(#arrowSoft); }
+      .arrow-memory { fill: none; stroke: #7c3aed; stroke-width: 1.8; marker-end: url(#arrowPurple); stroke-dasharray: 6 5; }
+      .arrow-obs { fill: none; stroke: #dc2626; stroke-width: 1.7; marker-end: url(#arrowRed); stroke-dasharray: 5 4; }
+      .lane { fill: none; stroke: #e5e7eb; stroke-width: 1; }
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#334155"/>
+    </marker>
+    <marker id="arrowSoft" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#64748b"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1050"/>
+
+  <text class="title" x="60" y="58">GenericAgent 项目架构图</text>
+  <text class="subtitle" x="60" y="86">多前端接入，本地 Agent 运行时，LLM 协议适配，9 个原子工具，分层记忆与长期任务系统</text>
+  <text class="small" x="1290" y="58">更新日期：2026-06-03</text>
+
+  <!-- Layer separators -->
+  <line class="lane" x1="40" y1="125" x2="1560" y2="125"/>
+  <line class="lane" x1="40" y1="285" x2="1560" y2="285"/>
+  <line class="lane" x1="40" y1="500" x2="1560" y2="500"/>
+  <line class="lane" x1="40" y1="735" x2="1560" y2="735"/>
+
+  <!-- Frontends -->
+  <text class="layer-label" x="60" y="153">前端层 / Frontends</text>
+  <rect class="card frontend" x="60" y="175" width="205" height="78"/>
+  <text class="box-title" x="82" y="205">CLI / Task mode</text>
+  <text class="mono" x="82" y="228">agentmain.py</text>
+
+  <rect class="card frontend" x="300" y="175" width="230" height="78"/>
+  <text class="box-title" x="322" y="205">TUI v2 / v3</text>
+  <text class="mono" x="322" y="228">frontends/tui_v3.py</text>
+
+  <rect class="card frontend" x="565" y="175" width="260" height="78"/>
+  <text class="box-title" x="587" y="205">Desktop App</text>
+  <text class="mono" x="587" y="228">Tauri + desktop_bridge.py</text>
+
+  <rect class="card frontend" x="860" y="175" width="230" height="78"/>
+  <text class="box-title" x="882" y="205">Streamlit / Web UI</text>
+  <text class="mono" x="882" y="228">launch.pyw, stapp*.py</text>
+
+  <rect class="card frontend" x="1125" y="175" width="360" height="78"/>
+  <text class="box-title" x="1147" y="205">IM Bots</text>
+  <text class="mono" x="1147" y="228">Telegram / WeChat / QQ / Feishu / WeCom / DingTalk</text>
+
+  <!-- Frontend support -->
+  <rect class="card note" x="565" y="285" width="260" height="75"/>
+  <text class="box-title" x="587" y="313">Desktop HTTP + WS Bridge</text>
+  <text class="box-text" x="587" y="336">session/new, prompt, messages, cancel</text>
+  <text class="mono" x="587" y="353">frontends/desktop_bridge.py</text>
+
+  <rect class="card note" x="940" y="285" width="300" height="75"/>
+  <text class="box-title" x="962" y="313">Common Chat Commands</text>
+  <text class="box-text" x="962" y="336">/help /status /new /continue /btw /review /llm</text>
+  <text class="mono" x="962" y="353">chatapp_common.py, slash_cmds.py</text>
+
+  <!-- Runtime -->
+  <text class="layer-label" x="60" y="315">运行时层 / Runtime</text>
+  <rect class="card runtime" x="115" y="385" width="295" height="110"/>
+  <text class="box-title" x="140" y="417">GenericAgent 会话与队列</text>
+  <text class="box-text" x="140" y="444">put_task(), task_queue, display_queue</text>
+  <text class="box-text" x="140" y="466">LLM 切换，一次性任务，reflect 模式</text>
+  <text class="mono" x="140" y="485">agentmain.py</text>
+
+  <rect class="card runtime" x="485" y="385" width="300" height="110"/>
+  <text class="box-title" x="510" y="417">Agent Runner Loop</text>
+  <text class="box-text" x="510" y="444">LLM 调用 -> 工具解析 -> 工具结果 -> 下一轮</text>
+  <text class="box-text" x="510" y="466">StepOutcome 控制继续 / 退出 / 中断</text>
+  <text class="mono" x="510" y="485">agent_loop.py</text>
+
+  <rect class="card runtime" x="860" y="385" width="310" height="110"/>
+  <text class="box-title" x="885" y="417">GenericAgentHandler</text>
+  <text class="box-text" x="885" y="444">do_code_run, do_file_read, do_web_scan...</text>
+  <text class="box-text" x="885" y="466">工具分发，工作记忆，plan mode 拦截</text>
+  <text class="mono" x="885" y="485">ga.py</text>
+
+  <rect class="card ops" x="1245" y="385" width="250" height="110"/>
+  <text class="box-title" x="1270" y="417">Hook / Trace</text>
+  <text class="box-text" x="1270" y="444">agent / turn / llm / tool hooks</text>
+  <text class="box-text" x="1270" y="466">Langfuse tracing 可选启用</text>
+  <text class="mono" x="1270" y="485">plugins/hooks.py</text>
+
+  <!-- LLM and tools -->
+  <text class="layer-label" x="60" y="535">模型与工具层 / LLM and Tools</text>
+  <rect class="card llm" x="80" y="565" width="365" height="142"/>
+  <text class="box-title" x="105" y="596">LLM 适配层</text>
+  <text class="box-text" x="105" y="623">NativeClaudeSession / NativeOAISession</text>
+  <text class="box-text" x="105" y="645">ToolClient / NativeToolClient</text>
+  <text class="box-text" x="105" y="667">SSE 解析，上下文裁剪，Mixin failover</text>
+  <text class="mono" x="105" y="690">llmcore.py, mykey.py</text>
+
+  <rect class="card tools" x="520" y="565" width="430" height="142"/>
+  <text class="box-title" x="545" y="596">9 个原子工具</text>
+  <text class="box-text" x="545" y="623">code_run, file_read, file_write, file_patch</text>
+  <text class="box-text" x="545" y="645">web_scan, web_execute_js, ask_user</text>
+  <text class="box-text" x="545" y="667">update_working_checkpoint, start_long_term_update</text>
+  <text class="mono" x="545" y="690">ga.py, assets/tools_schema*.json</text>
+
+  <rect class="card external" x="1025" y="565" width="220" height="142"/>
+  <text class="box-title" x="1050" y="596">本地系统</text>
+  <text class="box-text" x="1050" y="623">Filesystem</text>
+  <text class="box-text" x="1050" y="645">Python / PowerShell / Bash</text>
+  <text class="box-text" x="1050" y="667">GUI apps / user confirmation</text>
+  <text class="box-text" x="1050" y="689">temp/ 工作目录</text>
+
+  <rect class="card external" x="1315" y="565" width="220" height="142"/>
+  <text class="box-title" x="1340" y="596">真实浏览器</text>
+  <text class="box-text" x="1340" y="623">CDP tabs / JS execution</text>
+  <text class="box-text" x="1340" y="645">Simplified HTML</text>
+  <text class="box-text" x="1340" y="667">Preserved login state</text>
+  <text class="mono" x="1340" y="690">TMWebDriver.py, simphtml.py</text>
+
+  <!-- Memory and long running -->
+  <text class="layer-label" x="60" y="770">记忆、长期任务与工程支撑 / Memory, Long-running Modes, Ops</text>
+  <rect class="card memory" x="80" y="800" width="300" height="142"/>
+  <text class="box-title" x="105" y="831">分层记忆系统</text>
+  <text class="box-text" x="105" y="858">L0 Meta Rules / L1 Insight Index</text>
+  <text class="box-text" x="105" y="880">L2 Global Facts / L3 SOP Skills</text>
+  <text class="box-text" x="105" y="902">L4 Session Archive</text>
+  <text class="mono" x="105" y="925">memory/</text>
+
+  <rect class="card memory" x="440" y="800" width="300" height="142"/>
+  <text class="box-title" x="465" y="831">Skill / SOP 能力库</text>
+  <text class="box-text" x="465" y="858">autonomous, morphling, goal hive</text>
+  <text class="box-text" x="465" y="880">vision, ADB, OCR, UI detect</text>
+  <text class="box-text" x="465" y="902">skill_search, process memory scanner</text>
+  <text class="mono" x="465" y="925">memory/*.md, memory/*.py</text>
+
+  <rect class="card runtime" x="800" y="800" width="300" height="142"/>
+  <text class="box-title" x="825" y="831">Reflect / Long-running Modes</text>
+  <text class="box-text" x="825" y="858">Goal Mode, Scheduler, Autonomous</text>
+  <text class="box-text" x="825" y="880">Checklist master, Agent worker</text>
+  <text class="box-text" x="825" y="902">按预算或定时持续唤醒 Agent</text>
+  <text class="mono" x="825" y="925">reflect/</text>
+
+  <rect class="card ops" x="1160" y="800" width="300" height="142"/>
+  <text class="box-title" x="1185" y="831">配置、日志、观测</text>
+  <text class="box-text" x="1185" y="858">mykey.py, model profiles, diagnostics</text>
+  <text class="box-text" x="1185" y="880">model_responses, token usage, hooks</text>
+  <text class="box-text" x="1185" y="902">未来：policy, audit, doctor</text>
+  <text class="mono" x="1185" y="925">temp/, plugins/, docs/</text>
+
+  <!-- Main arrows -->
+  <path class="arrow" d="M162 253 C162 315 210 330 250 385"/>
+  <path class="arrow" d="M415 253 C415 315 490 330 590 385"/>
+  <path class="arrow" d="M695 253 L695 285"/>
+  <path class="arrow" d="M975 253 C975 315 970 338 925 385"/>
+  <path class="arrow" d="M1305 253 C1305 320 1160 340 1035 385"/>
+
+  <path class="arrow" d="M825 322 C850 335 895 352 940 385"/>
+  <path class="arrow-soft" d="M1090 360 C1085 372 1065 380 1035 385"/>
+
+  <path class="arrow" d="M410 440 L485 440"/>
+  <path class="arrow" d="M785 440 L860 440"/>
+  <path class="arrow" d="M635 495 C620 535 525 560 445 610"/>
+  <path class="arrow" d="M1015 495 C980 530 900 550 780 565"/>
+
+  <path class="arrow-soft" d="M950 636 L1025 636"/>
+  <path class="arrow-soft" d="M950 636 C1100 540 1225 540 1315 610"/>
+  <path class="arrow-soft" d="M1170 440 L1245 440"/>
+
+  <!-- Memory feedback arrows -->
+  <path class="arrow-memory" d="M230 800 C270 720 330 650 520 636"/>
+  <path class="arrow-memory" d="M590 800 C615 740 650 715 710 707"/>
+  <path class="arrow-memory" d="M950 800 C930 735 900 720 820 707"/>
+  <path class="arrow-memory" d="M380 870 C570 1000 900 1010 1160 890"/>
+
+  <!-- Ops arrows -->
+  <path class="arrow-obs" d="M1245 440 C1180 520 1110 545 950 565"/>
+  <path class="arrow-obs" d="M1310 800 C1310 715 1280 610 1240 495"/>
+
+  <!-- Legend -->
+  <rect class="card" x="60" y="970" width="1480" height="48"/>
+  <rect class="frontend" x="82" y="987" width="18" height="18" rx="4"/>
+  <text class="small" x="108" y="1001">前端</text>
+  <rect class="runtime" x="165" y="987" width="18" height="18" rx="4"/>
+  <text class="small" x="191" y="1001">运行时</text>
+  <rect class="llm" x="260" y="987" width="18" height="18" rx="4"/>
+  <text class="small" x="286" y="1001">LLM</text>
+  <rect class="tools" x="340" y="987" width="18" height="18" rx="4"/>
+  <text class="small" x="366" y="1001">工具</text>
+  <rect class="memory" x="425" y="987" width="18" height="18" rx="4"/>
+  <text class="small" x="451" y="1001">记忆 / SOP</text>
+  <rect class="ops" x="555" y="987" width="18" height="18" rx="4"/>
+  <text class="small" x="581" y="1001">观测 / 安全 / 配置</text>
+  <line class="arrow" x1="745" y1="996" x2="810" y2="996"/>
+  <text class="small" x="824" y="1001">主执行链路</text>
+  <line class="arrow-memory" x1="940" y1="996" x2="1005" y2="996"/>
+  <text class="small" x="1019" y="1001">记忆回流</text>
+  <line class="arrow-obs" x1="1125" y1="996" x2="1190" y2="996"/>
+  <text class="small" x="1204" y="1001">观测 / 审计</text>
+</svg>
