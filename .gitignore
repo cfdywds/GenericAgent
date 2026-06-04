@@ -138,3 +138,4 @@ reflect/*
 **/__pycache__/
 
 .claude/
+.worktrees/
