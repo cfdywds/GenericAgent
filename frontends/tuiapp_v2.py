@@ -1049,8 +1049,20 @@ Screen { background: $ga-bg; color: $ga-fg; }
     background: $ga-bg;
     padding: 1 2;
     border-right: solid $ga-alt-bg;
+    scrollbar-size: 0 1;
+    scrollbar-background: $ga-bg;
+    scrollbar-background-hover: $ga-bg;
+    scrollbar-background-active: $ga-bg;
+    scrollbar-color: $ga-border;
+    scrollbar-color-hover: $ga-border-hi;
+    scrollbar-color-active: $ga-dim;
 }
 #sidebar.-hidden, #sidebar.-narrow { display: none; }
+
+#sidebar-content {
+    width: 100%;
+    height: auto;
+}
 
 #main {
     height: 100%;
@@ -1097,7 +1109,7 @@ Screen { background: $ga-bg; color: $ga-fg; }
    (SelectionList). Same flat single-column look as the rest of the chat,
    with a thin green left edge so the picker reads as an actionable card. */
 OptionList.picker, SelectionList.picker {
-    height: auto;
+    height: 12;
     max-height: 12;
     margin: 0 0 1 0;
     padding: 0 1;
@@ -1177,7 +1189,7 @@ OptionList > .option-list--option-highlighted {
 }
 
 ChoiceList {
-    height: auto;
+    height: 12;
     max-height: 12;
     background: $ga-bg;
     border: none;
@@ -1267,7 +1279,7 @@ class ChatMessage:
 class AgentSession:
     agent_id: int
     name: str
-    agent: Any
+    agent: Optional[Any] = None
     thread: Optional[threading.Thread] = None
     status: str = "idle"
     messages: list[ChatMessage] = field(default_factory=list)
@@ -1304,6 +1316,12 @@ class AgentSession:
     pending: list[str] = field(default_factory=list)
     pending_wrapped: list[str] = field(default_factory=list)
     pending_lk: threading.Lock = field(default_factory=threading.Lock)
+    # Startup sidebar entries for past logs are lazy: they show metadata first,
+    # then materialize into a real agent session only when selected.
+    lazy_history_path: Optional[str] = None
+    lazy_history_mtime: float = 0.0
+    lazy_history_preview: str = ""
+    lazy_history_rounds: int = 0
 
 
 def default_agent_factory() -> Any:
@@ -1632,8 +1650,15 @@ class SearchableChoiceList(Vertical):
         # so it does NOT match the Vertical wrapper — only the inner list it
         # builds can claim the height cap. (Root-cause fix 2026-05-27.)
         if len(choices) > self.LAZY_THRESHOLD:
-            return LazyChoiceList(self.msg, labels, batch=self.LAZY_THRESHOLD, classes="picker")
-        return ChoiceList(self.msg, *labels, classes="picker")
+            picker = LazyChoiceList(self.msg, labels, batch=self.LAZY_THRESHOLD, classes="picker")
+        else:
+            picker = ChoiceList(self.msg, *labels, classes="picker")
+        # Textual CSS cascade: component DEFAULT_CSS `height: auto` can win
+        # over app CSS `height: 12` even at equal specificity.  Force the cap
+        # directly on the widget so the inner OptionList actually scrolls.
+        picker.styles.height = 12
+        picker.styles.max_height = 12
+        return picker
 
     # Debounce window for incremental filtering. Content-grep across ~270
     # session files costs ~0.2s; running it per keystroke makes the Input
@@ -2510,6 +2535,8 @@ def _history_text(content) -> str:
 
 
 def _sidebar_last_user(sess: AgentSession) -> str:
+    if sess.lazy_history_path and sess.agent is None:
+        return sess.lazy_history_preview
     # Read from LLM-side history so /clear (display-only) doesn't wipe sidebar preview.
     try:
         history = sess.agent.llmclient.backend.history
@@ -2529,6 +2556,10 @@ def _sidebar_last_user(sess: AgentSession) -> str:
 
 
 def _sidebar_last_summary(sess: AgentSession) -> str:
+    if sess.lazy_history_path and sess.agent is None:
+        age = _short_age(sess.lazy_history_mtime) if sess.lazy_history_mtime else "history"
+        rounds = f"{sess.lazy_history_rounds}轮" if sess.lazy_history_rounds else "历史"
+        return f"{age} · {rounds}"
     try:
         history = sess.agent.llmclient.backend.history
     except Exception:
@@ -2568,12 +2599,14 @@ def render_sidebar(sessions: dict[int, AgentSession], current_id: Optional[int])
     for sid, sess in sessions.items():
         active = sid == current_id
         style = SEL if active else None
+        lazy = bool(sess.lazy_history_path and sess.agent is None)
+        status = f"{sess.lazy_history_rounds}轮" if lazy and sess.lazy_history_rounds else sess.status
         spacer(style)
         sess_tbl.add_row(
             blank,
             Text("●" if active else "›", style=C_GREEN if active else C_DIM),
             Text(_truncate(f"#{sid} {sess.name}", 16), style=C_GREEN if active else C_MUTED),
-            Text(sess.status, style=C_DIM),
+            Text(status, style=C_DIM),
             blank, style=style,
         )
         if (q := _sidebar_last_user(sess)): preview("Q", q, style)
@@ -2813,7 +2846,8 @@ class GenericAgentTUI(App[None]):
     def compose(self) -> ComposeResult:
         yield Static("", id="topbar")
         with Horizontal(id="body"):
-            yield Static("", id="sidebar")
+            with VerticalScroll(id="sidebar"):
+                yield Static("", id="sidebar-content")
             with Vertical(id="main"):
                 yield VerticalScroll(id="messages")
                 yield Static("", id="planbar")
@@ -2837,6 +2871,7 @@ class GenericAgentTUI(App[None]):
         _sweep_stale_task_dirs()  # clear empty signal dirs left by prior runs
         self.add_session("main")
         self._system(f"Welcome to GenericAgent TUI. 按 / 唤起命令面板，{fmt_key('ctrl+n')} 新建会话。")
+        self._load_history_sidebar_sessions()
 
         # CSS `#planbar { display: none }` keeps it hidden by default —
         # the renderer flips it on once items materialize.
@@ -2931,33 +2966,163 @@ class GenericAgentTUI(App[None]):
             raise RuntimeError("no active session")
         return self.sessions[self.current_id]
 
-    def add_session(self, name: Optional[str] = None) -> AgentSession:
-        agent_id = next(self._ids)
+    def _start_agent_for_session(self, sess: AgentSession) -> Any:
+        if sess.agent is not None:
+            return sess.agent
         agent = self.agent_factory()
         try: agent.inc_out = True
         except Exception: pass
-        # Per-session task_dir path enables ga's `_intervene` / `_keyinfo`
-        # consume paths (ga.py:575).  PID+session scoped so concurrent
-        # sessions don't share signal files.  We only set the *path* here —
-        # the dir is created lazily by the writer (`_session_intervene_path`)
-        # when a signal is actually injected.  Eager makedirs left a stale
-        # empty `temp/_tui_v2_<pid>_<id>` behind for every session that never
-        # used intervene; `consume_file` tolerates a missing dir.
         try:
             agent.task_dir = os.path.join(FRONTENDS_DIR, '..', 'temp',
-                                          f'_tui_v2_{os.getpid()}_{agent_id}')
+                                          f'_tui_v2_{os.getpid()}_{sess.agent_id}')
         except Exception:
             pass
-        sess = AgentSession(agent_id=agent_id, name=name or f"agent-{agent_id}", agent=agent)
-        thread = threading.Thread(target=agent.run, name=f"ga-tui-agent-{agent_id}", daemon=True)
+        sess.agent = agent
+        thread = threading.Thread(target=agent.run, name=f"ga-tui-agent-{sess.agent_id}", daemon=True)
         thread.start()
         sess.thread = thread
-        self.sessions[agent_id] = sess
-        self.current_id = agent_id
         self._install_ask_user_hook(sess)
         self._install_intervene_replay_hook(sess)
+        return agent
+
+    def add_session(self, name: Optional[str] = None) -> AgentSession:
+        agent_id = next(self._ids)
+        sess = AgentSession(agent_id=agent_id, name=name or f"agent-{agent_id}")
+        self.sessions[agent_id] = sess
+        self.current_id = agent_id
+        # Per-session task_dir path enables ga's `_intervene` / `_keyinfo`
+        # consume paths (ga.py:575). PID+session scoped so concurrent sessions
+        # don't share signal files; the directory is still created lazily.
+        self._start_agent_for_session(sess)
         self._refresh_all()
         return sess
+
+    def _history_session_name(self, path: str) -> str:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        stem = stem.replace("model_responses_snapshot_", "history-")
+        stem = stem.replace("model_responses_", "history-")
+        return stem or "history"
+
+    def _load_history_sidebar_sessions(self) -> None:
+        try:
+            sessions = continue_list(exclude_pid=os.getpid())
+        except Exception as e:
+            self._system(f"⚠️ 自动装载历史会话失败: {type(e).__name__}: {e}")
+            return
+        existing = set()
+        for sess in self.sessions.values():
+            path = sess.lazy_history_path
+            if sess.agent is not None:
+                path = getattr(sess.agent, "log_path", "") or path
+            if path:
+                existing.add(os.path.abspath(path))
+        try:
+            import session_names as _sn
+        except Exception:
+            _sn = None
+        added = 0
+        for path, mtime, first, n in sessions:
+            ap = os.path.abspath(path)
+            if ap in existing:
+                continue
+            nm = ""
+            if _sn is not None:
+                try: nm = _sn.name_for(path)
+                except Exception: nm = ""
+            name = (nm or self._history_session_name(path)).strip() or "history"
+            sid = next(self._ids)
+            self.sessions[sid] = AgentSession(
+                agent_id=sid,
+                name=name,
+                status="history",
+                lazy_history_path=path,
+                lazy_history_mtime=mtime,
+                lazy_history_preview=(first or "（无法预览）").replace("\n", " ").strip(),
+                lazy_history_rounds=int(n or 0),
+            )
+            existing.add(ap)
+            added += 1
+        if added:
+            self._refresh_sidebar()
+
+    def _restore_session_from_path(self, sess: AgentSession, path: str, *, defer_finish: bool = True) -> str:
+        if sess.agent is None:
+            self._start_agent_for_session(sess)
+        from continue_cmd import reset_conversation, restore
+        try:
+            reset_conversation(sess.agent, message=None)
+            result, ok = restore(sess.agent, path)
+        except Exception as e:
+            msg = f"❌ 恢复失败: {e}"
+            self._system(msg); return msg
+        if not ok:
+            self._system(result); return result
+        current_log = getattr(sess.agent, "log_path", "") or ""
+        if current_log and path != current_log:
+            try:
+                import shutil
+                shutil.copyfile(path, current_log)
+            except Exception:
+                pass
+        def _finish():
+            sess.messages.clear()
+            sess.plan_items = []
+            sess.plan_complete_since = None
+            sess.plan_lost_since = None
+            try: self._plan_mtime.pop(sess.agent_id, None)
+            except Exception: pass
+            for h in continue_extract(path):
+                sess.messages.append(ChatMessage(role=h["role"], content=h["content"]))
+            sess.plan_scan_baseline = 0
+            try:
+                import plan_state
+                pp = plan_state.resolve_path(sess.agent, messages=sess.messages)
+                if pp and os.path.isfile(pp):
+                    with open(pp, encoding="utf-8", errors="replace") as f:
+                        items = plan_state.extract(f.read())
+                    if items and plan_state.is_complete(items):
+                        sess.plan_scan_baseline = len(sess.messages)
+            except OSError:
+                pass
+            except Exception:
+                pass
+            try:
+                import session_names
+                nm = session_names.name_for(path)
+                if nm:
+                    sess.name = nm
+                    if current_log:
+                        session_names.migrate(path, current_log)
+            except Exception:
+                pass
+            sess.status = "idle"
+            sess.lazy_history_path = None
+            sess.lazy_history_mtime = 0.0
+            sess.lazy_history_preview = ""
+            sess.lazy_history_rounds = 0
+            self._remount_current_session()
+            self._refresh_all()
+        if defer_finish:
+            self.call_after_refresh(_finish)
+        else:
+            _finish()
+        return result.splitlines()[0] if result else "✅ 已恢复"
+
+    def _activate_history_session(self, sess: AgentSession) -> bool:
+        path = sess.lazy_history_path
+        if not path or sess.agent is not None:
+            return True
+        self._restore_session_from_path(sess, path, defer_finish=False)
+        return sess.agent is not None
+
+    def _switch_session(self, sid: int) -> bool:
+        if sid not in self.sessions:
+            return False
+        self.current_id = sid
+        self._activate_history_session(self.sessions[sid])
+        self._last_title = ""
+        self._refresh_all()
+        return True
 
     def _install_ask_user_hook(self, sess: AgentSession) -> None:
         """Capture ask_user INTERRUPT payloads from agent_loop's turn_end hook.
@@ -2973,6 +3138,8 @@ class GenericAgentTUI(App[None]):
         where `parent` is the GenericAgent — so the dict lives on the agent.
         """
         agent = sess.agent
+        if agent is None:
+            return
         try:
             hooks = getattr(agent, "_turn_end_hooks", None)
             if hooks is None:
@@ -3000,15 +3167,13 @@ class GenericAgentTUI(App[None]):
         ids = sorted(self.sessions.keys())
         if len(ids) <= 1: return
         i = ids.index(self.current_id)
-        self.current_id = ids[(i - 1) % len(ids)]
-        self._refresh_all()
+        self._switch_session(ids[(i - 1) % len(ids)])
 
     def action_next_session(self) -> None:
         ids = sorted(self.sessions.keys())
         if len(ids) <= 1: return
         i = ids.index(self.current_id)
-        self.current_id = ids[(i + 1) % len(ids)]
-        self._refresh_all()
+        self._switch_session(ids[(i + 1) % len(ids)])
 
     def copy_to_clipboard(self, text: str) -> None:
         """Override Textual's OSC 52 clipboard (broken on macOS Terminal.app).
@@ -3100,7 +3265,7 @@ class GenericAgentTUI(App[None]):
         # via a short timer (call_after_refresh alone races the layout and the
         # remount can capture the old content_region.width — leaving messages
         # wrapped at the previous width after Ctrl+B).
-        sidebar = self.query_one("#sidebar", Static)
+        sidebar = self.query_one("#sidebar", VerticalScroll)
         sidebar.toggle_class("-hidden")
         for sess in self.sessions.values():
             for m in sess.messages:
@@ -3194,9 +3359,8 @@ class GenericAgentTUI(App[None]):
         i = ids.index(sid)
         next_id = ids[i + 1] if i + 1 < len(ids) else ids[i - 1]
         del self.sessions[sid]
-        self.current_id = next_id
         self._last_title = ""  # force title refresh on next call
-        self._refresh_all()
+        self._switch_session(next_id)
         self._system(f"✅ 已从侧栏移除 #{sid} {name!r}")
 
     def action_show_help(self) -> None:
@@ -3332,13 +3496,18 @@ class GenericAgentTUI(App[None]):
             self._remount_assistant_message(msg)
             return
         try:
-            sidebar = self.query_one("#sidebar", Static)
+            sidebar = self.query_one("#sidebar", VerticalScroll)
+            sidebar_content = self.query_one("#sidebar-content", Static)
         except Exception:
             return
-        if event.widget is not sidebar:
+        if event.widget is sidebar_content:
+            y = event.y - 3
+        elif event.widget is sidebar:
+            y = event.y + sidebar.scroll_y - 3
+        else:
             return
-        # event.y is widget-local (includes padding-top=1). Layout: pad + "SESSIONS" + blank.
-        y = event.y - 3
+        # Layout: pad + "SESSIONS" + blank. Scroll offset is already included
+        # for content clicks; add it only when Textual targets the scroll shell.
         if y < 0:
             return
         for sid, sess in self.sessions.items():
@@ -3347,8 +3516,7 @@ class GenericAgentTUI(App[None]):
             if _sidebar_last_summary(sess): rows += 1
             if y < rows:
                 if sid != self.current_id:
-                    self.current_id = sid
-                    self._refresh_all()
+                    self._switch_session(sid)
                 return
             y -= rows
 
@@ -3372,7 +3540,7 @@ class GenericAgentTUI(App[None]):
 
     def _apply_responsive_layout(self) -> None:
         try:
-            sidebar = self.query_one("#sidebar", Static)
+            sidebar = self.query_one("#sidebar", VerticalScroll)
             main = self.query_one("#main", Vertical)
         except Exception:
             return
@@ -3761,8 +3929,7 @@ class GenericAgentTUI(App[None]):
                 if s.name == key: target = sid; break
         if target is None:
             self._system(f"No session: {key!r}"); return
-        self.current_id = target
-        self._refresh_all()
+        self._switch_session(target)
         self._system(f"Switched to #{target}.")
 
     def _cmd_close(self, args, raw):
@@ -3770,8 +3937,7 @@ class GenericAgentTUI(App[None]):
             self._system("Cannot close the last session."); return
         closed = self.sessions.pop(self.current_id)
         _rmdir_if_empty(getattr(closed.agent, 'task_dir', None))
-        self.current_id = next(iter(self.sessions))
-        self._refresh_all()
+        self._switch_session(next(iter(self.sessions)))
 
     def _cmd_rename(self, args, raw):
         if not args:
@@ -4127,64 +4293,7 @@ class GenericAgentTUI(App[None]):
         self._refresh_messages()
 
     def _do_continue_restore(self, path: str) -> str:
-        sess = self.current
-        from continue_cmd import reset_conversation, restore
-        try:
-            reset_conversation(sess.agent, message=None)
-            result, ok = restore(sess.agent, path)
-        except Exception as e:
-            msg = f"❌ 恢复失败: {e}"
-            self._system(msg); return msg
-        if not ok:
-            self._system(result); return result
-        # Mirror the source transcript into this agent's own log file so a
-        # future /continue resolves the merged history under the migrated name.
-        current_log = getattr(sess.agent, "log_path", "") or ""
-        if current_log and path != current_log:
-            try:
-                import shutil
-                shutil.copyfile(path, current_log)
-            except Exception:
-                pass
-        def _finish():
-            sess.messages.clear()
-            # Plan state belongs to the *previous* conversation. Clearing it
-            # along with messages stops the planbar from leaking stale items
-            # (`Plan (3/7)` from #4 qxs) into the freshly-restored session.
-            sess.plan_items = []
-            sess.plan_complete_since = None
-            sess.plan_lost_since = None
-            self._plan_mtime.pop(sess.agent_id, None)
-            for h in continue_extract(path):
-                sess.messages.append(ChatMessage(role=h["role"], content=h["content"]))
-            # baseline=0 lets the scanner see prior plan_X/plan.md refs so an
-            # unfinished plan resumes after /continue. Only when the restored
-            # plan.md is already all-done do we push baseline past history to
-            # suppress the stale ✓ card.
-            sess.plan_scan_baseline = 0
-            import plan_state
-            pp = plan_state.resolve_path(sess.agent, messages=sess.messages)
-            if pp and os.path.isfile(pp):
-                try:
-                    with open(pp, encoding="utf-8", errors="replace") as f:
-                        items = plan_state.extract(f.read())
-                    if items and plan_state.is_complete(items):
-                        sess.plan_scan_baseline = len(sess.messages)
-                except OSError:
-                    pass
-            try:
-                import session_names
-                nm = session_names.name_for(path)
-                if nm:
-                    sess.name = nm
-                    if current_log:
-                        session_names.migrate(path, current_log)
-            except Exception:
-                pass
-            self._remount_current_session()
-            self._refresh_all()
-        self.call_after_refresh(_finish)
-        return result.splitlines()[0] if result else "✅ 已恢复"
+        return self._restore_session_from_path(self.current, path)
 
     def _cmd_cost(self, args, raw):
         try:
@@ -5073,6 +5182,8 @@ class GenericAgentTUI(App[None]):
     _PLAN_LOST_GRACE_SEC = 1.5
 
     def _update_plan_state(self, sess: AgentSession, _stream_text: str = "") -> None:
+        if sess.agent is None:
+            return
         import plan_state
         prev = sess.plan_items
         # Detect plan mode: `working['in_plan_mode']` first, fallback to per-
@@ -5105,6 +5216,8 @@ class GenericAgentTUI(App[None]):
         try: bar = self.query_one("#planbar", Static)
         except Exception: return
         sess = self.sessions.get(self.current_id) if self.current_id is not None else None
+        if sess is None or sess.agent is None:
+            self._set_planbar_visible(bar, False); return
         items = sess.plan_items if sess else []
         if sess and sess.plan_lost_since is not None:
             if time.time() - sess.plan_lost_since >= self._PLAN_LOST_GRACE_SEC:
@@ -5190,7 +5303,8 @@ class GenericAgentTUI(App[None]):
         # Poll only the visible session — background sessions don't paint planbar.
         import plan_state
         sess = self.sessions.get(self.current_id) if self.current_id is not None else None
-        if sess is None: return
+        if sess is None or sess.agent is None:
+            self._refresh_planbar(); return
         msgs = sess.messages
         base = sess.plan_scan_baseline
         if not plan_state.is_active(sess.agent, messages=msgs, start_idx=base):
@@ -5377,7 +5491,7 @@ class GenericAgentTUI(App[None]):
 
     def _refresh_sidebar(self):
         if not self.is_mounted: return
-        self.query_one("#sidebar", Static).update(render_sidebar(self.sessions, self.current_id))
+        self.query_one("#sidebar-content", Static).update(render_sidebar(self.sessions, self.current_id))
 
     def _at_bottom(self, container) -> bool:
         try:
