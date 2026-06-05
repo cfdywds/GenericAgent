@@ -34,7 +34,8 @@ ljqCtrl.Click(ox + (bbox[0] + bbox[2]) // 2, oy + (bbox[1] + bbox[3]) // 2)
 
 ## 4. 避坑指南
 - **窗口激活**：模拟操作前必须确保窗口已通过 `activate()` 置于前台。
-- **客户区原点**：截图内容是客户区；点击截图内元素时，用 `win32gui.ClientToScreen(hwnd, (0, 0))` 取客户区屏幕原点，禁止直接用 `GetWindowRect` 左上角。
+- **客户区原点**：截图内容是客户区；点击截图内元素时，用 `win32gui.ClientToScreen(hwnd, (0, 0))` 取客户区屏幕原点，禁止直接用 `GetWindowRect` 或 `DwmGetWindowAttribute(hwnd, 9, ...)` 的窗口矩形左上角。
+- **点击反馈**：`ljqCtrl.Click` 后若像素变化为 0% 或接近 0%，说明可能点歪；立即检查窗口原点、`dpi_scale`、客户区/窗口矩形混用，禁止盲目重试。
 - **DPI aware**：未调用 `SetProcessDPIAware()` 时，`GetWindowRect/ClientToScreen/GetClientRect` 通常返回逻辑坐标，必须换算。
 - **文本输入**：ljqCtrl 无 TypeText/SendKeys。先点击/三击选中字段，再 `pyperclip.copy(text); ljqCtrl.Press('ctrl+v')`。
 - **Java/Swing 截图**：PyCharm/IntelliJ 等可能让 `GrabWindow*` 抓到桌面壁纸；改用 `PrintWindow(PW_RENDERFULLCONTENT=2)`。详见 `memory/ljqCtrl_cases.md#java-swing-printwindow`。
