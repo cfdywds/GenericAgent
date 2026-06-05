@@ -180,6 +180,24 @@ class SidebarHelperTests(unittest.TestCase):
         self.assertIn("[goal]", label)
         self.assertIn("4轮", label)
 
+    def test_continue_choice_label_uses_session_meta_role_and_parent(self):
+        with patch.object(
+            tui.session_meta,
+            "get_meta",
+            return_value={"role": "goal_child", "parent_log": "D:/tmp/model_responses_parent.txt"},
+        ):
+            label = tui.sidebar_continue_choice_label(
+                path="D:/tmp/model_responses_12.txt",
+                mtime=1_783_000_000.0,
+                preview="持续推进修复历史栏",
+                rounds=5,
+                persisted_name="",
+            )
+
+        self.assertIn("[goal child]", label)
+        self.assertIn("└─", label)
+        self.assertIn("5轮", label)
+
     def test_sidebar_sort_at_skips_nan_and_inf(self):
         nan_sess = tui.AgentSession(agent_id=21, name="nan")
         nan_sess.sidebar_sort_at = math.nan
@@ -229,7 +247,7 @@ class SidebarRenderTests(unittest.TestCase):
         )
 
         self.assertEqual([(row.sid, row.display_no) for row in rows], [(20, 1), (10, 2), (1, 3)])
-        self.assertEqual(tui.sidebar_sid_at_visual_row({1: current, 10: first_history, 20: second_history}, 1, 2), 10)
+        self.assertEqual(tui.sidebar_sid_at_visual_row({1: current, 10: first_history, 20: second_history}, 1, 3), 10)
 
     def test_sidebar_history_row_has_distinct_styled_number_name_time_and_rounds(self):
         sess = tui.AgentSession(
@@ -270,6 +288,7 @@ class SidebarRenderTests(unittest.TestCase):
         output = render_plain(tui.render_sidebar({2: sess}, current_id=2))
 
         self.assertIn("SESSIONS 1", output)
+        self.assertIn("────────", output)
         self.assertIn("优化历史栏排序", output)
         self.assertIn("3轮", output)
         self.assertNotIn("model_responses_2", output)
@@ -346,6 +365,29 @@ class SidebarRenderTests(unittest.TestCase):
         output = render_plain(tui.render_sidebar({5: sess}, current_id=5))
 
         self.assertIn("[goal]", output)
+
+    def test_render_sidebar_uses_session_meta_for_child_history(self):
+        sess = tui.AgentSession(
+            agent_id=6,
+            name="history-goal-child",
+            status="history",
+            lazy_history_path="D:/tmp/model_responses_6.txt",
+            lazy_history_mtime=1_783_000_000.0,
+            lazy_history_preview="持续推进修复侧栏",
+            lazy_history_rounds=7,
+        )
+
+        with patch.object(
+            tui.session_meta,
+            "get_meta",
+            return_value={"role": "goal_child", "parent_log": "D:/tmp/model_responses_parent.txt"},
+        ):
+            tui.refresh_sidebar_metadata(sess, name_lookup=lambda _path: "")
+            output = render_plain(tui.render_sidebar({6: sess}, current_id=6))
+
+        self.assertEqual(sess.sidebar_kind, "goal_child")
+        self.assertIn("└─", output)
+        self.assertIn("[goal child]", output)
 
 
 if __name__ == "__main__":

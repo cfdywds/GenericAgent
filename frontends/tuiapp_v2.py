@@ -805,6 +805,7 @@ from btw_cmd import handle_frontend_command as btw_handle
 from review_cmd import handle as review_handle
 from continue_cmd import list_sessions as continue_list, extract_ui_messages as continue_extract
 from export_cmd import last_assistant_text, export_to_temp, wrap_for_clipboard
+import session_meta
 
 # Cross-platform clipboard copy for /export clip. Mirrors tui_v3's native-tool
 # strategy but stays local to v2 so the Textual frontend has no dependency on
@@ -1354,6 +1355,7 @@ class AgentSession:
     sidebar_preview: str = ""
     sidebar_summary: str = ""
     sidebar_kind: str = "main"
+    sidebar_parent_log: str = ""
     sidebar_activity_at: float = 0.0
     sidebar_sort_at: float = 0.0
     sidebar_meta_sig: tuple = field(default_factory=tuple, repr=False)
@@ -2639,7 +2641,12 @@ def _sidebar_history_time(mtime: float) -> str:
     return "history " + time.strftime("%m-%d %H:%M", time.localtime(mtime))
 
 
-def sidebar_session_kind(path: str = "", preview: str = "", title: str = "") -> str:
+def sidebar_session_kind(path: str = "", preview: str = "", title: str = "", meta: Optional[dict] = None) -> str:
+    role = ""
+    if isinstance(meta, dict):
+        role = session_meta.normalize_role(str(meta.get("role") or ""))
+    if role and role != "main":
+        return role
     hay = "\n".join(str(x or "") for x in (path, preview, title)).lower()
     if "goal mode" in hay or "[goal mode" in hay or "goal_state" in hay:
         return "goal"
@@ -2656,7 +2663,28 @@ def sidebar_session_kind(path: str = "", preview: str = "", title: str = "") -> 
 
 def sidebar_kind_label(kind: str) -> str:
     kind = (kind or "main").strip().lower()
-    return "" if kind == "main" else f"[{kind}]"
+    labels = {
+        "main": "",
+        "goal": "[goal]",
+        "hive": "[hive]",
+        "goal_launcher": "[goal launcher]",
+        "goal_child": "[goal child]",
+        "goal_master": "[goal master]",
+        "hive_launcher": "[hive launcher]",
+        "hive_master": "[hive master]",
+        "hive_worker": "[worker]",
+        "worker": "[worker]",
+    }
+    return labels.get(kind, f"[{kind.replace('_', ' ')}]")
+
+
+def _sidebar_meta_for_path(path: str) -> dict:
+    if not path:
+        return {}
+    try:
+        return session_meta.get_meta(path)
+    except Exception:
+        return {}
 
 
 def sidebar_continue_choice_label(
@@ -2668,7 +2696,10 @@ def sidebar_continue_choice_label(
 ) -> str:
     preview = _sidebar_clean_text((preview or "（无法预览）").replace("\n", " "), 50)
     title = sidebar_display_name(path=path, persisted_name=persisted_name, preview=preview, mtime=mtime)
-    kind = sidebar_session_kind(path=path, preview=preview, title=title)
+    meta = _sidebar_meta_for_path(path)
+    kind = sidebar_session_kind(path=path, preview=preview, title=title, meta=meta)
+    if meta.get("parent_log"):
+        title = f"└─ {title}"
     parts = [_short_age(mtime), sidebar_kind_label(kind), title, f"{int(rounds or 0)}轮"]
     if preview and _sidebar_clean_text(preview) != _sidebar_clean_text(title):
         parts.append(preview)
@@ -2798,6 +2829,7 @@ def _sidebar_sort_at(sess: AgentSession) -> float:
 
 def refresh_sidebar_metadata(sess: AgentSession, name_lookup=None) -> AgentSession:
     path = _sidebar_session_path(sess)
+    meta = _sidebar_meta_for_path(path)
     persisted = _sidebar_lookup_name(path, name_lookup)
     if not persisted and not (sess.lazy_history_path and sess.agent is None):
         persisted = sess.name
@@ -2812,6 +2844,7 @@ def refresh_sidebar_metadata(sess: AgentSession, name_lookup=None) -> AgentSessi
         sess.lazy_history_preview,
         sess.lazy_history_rounds,
         persisted,
+        tuple(sorted(meta.items())) if isinstance(meta, dict) else (),
         _sidebar_history_len(sess),
         log_mtime,
     )
@@ -2825,8 +2858,12 @@ def refresh_sidebar_metadata(sess: AgentSession, name_lookup=None) -> AgentSessi
         preview=preview,
         mtime=sess.lazy_history_mtime or log_mtime,
     )
-    kind = sidebar_session_kind(path=path, preview=preview, title=title)
+    kind = sidebar_session_kind(path=path, preview=preview, title=title, meta=meta)
     sess.sidebar_kind = kind
+    parent_log = str(meta.get("parent_log") or "").strip() if isinstance(meta, dict) else ""
+    sess.sidebar_parent_log = parent_log
+    if parent_log and not title.startswith("└─ "):
+        title = f"└─ {title}"
     summary = _sidebar_status_text(sess)
     if not (sess.lazy_history_path and sess.agent is None):
         summary = _sidebar_clean_text(_sidebar_last_summary(sess)) or summary
@@ -2901,7 +2938,7 @@ class SidebarRow:
 
     @property
     def row_count(self) -> int:
-        return max(1, len(self.title_lines)) + 1 + (1 if self.preview else 0)
+        return 1 + max(1, len(self.title_lines)) + 1 + (1 if self.preview else 0)
 
 
 def _sidebar_title_text_width(content_width: int, display_no: int) -> int:
@@ -2952,7 +2989,12 @@ def sidebar_sid_at_visual_row(
 
 
 def _sidebar_row_count(sess: AgentSession) -> int:
-    return 2 + (1 if _sidebar_render_preview(sess) else 0)
+    return 3 + (1 if _sidebar_render_preview(sess) else 0)
+
+
+def _sidebar_separator_text(content_width: int) -> Text:
+    width = max(8, int(content_width or 30) - 6)
+    return Text("─" * width, style=C_DIM)
 
 
 def sidebar_render_row_text(row: SidebarRow) -> tuple[Text, Text]:
@@ -2995,6 +3037,7 @@ def render_sidebar(
     for row in sidebar_render_rows(sessions, current_id, content_width):
         style = SEL if row.active else None
         title_text, meta_text = sidebar_render_row_text(row)
+        sess_tbl.add_row(blank, _sidebar_separator_text(content_width), blank, style=style)
         sess_tbl.add_row(
             Text("●" if row.active or row.running else "›", style=C_GREEN if row.active or row.running else C_DIM),
             title_text,
@@ -3199,6 +3242,10 @@ class GenericAgentTUI(App[None]):
         # Drop session_names entries pointing at rotated-away logs.
         try:
             import session_names; session_names.gc()
+        except Exception:
+            pass
+        try:
+            session_meta.gc()
         except Exception:
             pass
 
@@ -3527,6 +3574,11 @@ class GenericAgentTUI(App[None]):
             except Exception:
                 if restored_title:
                     sess.name = restored_title
+            if current_log:
+                try:
+                    session_meta.migrate(path, current_log)
+                except Exception:
+                    pass
             sess.status = "idle"
             sess.lazy_history_path = None
             sess.lazy_history_mtime = 0.0
@@ -4947,6 +4999,42 @@ class GenericAgentTUI(App[None]):
         self.exit()
 
     # ---------------- slash_cmds bundle ----------------
+    def _slash_session_tracking_prompt(self, head: str, parent_log: str) -> str:
+        role = {
+            "/goal": "goal_child",
+            "/hive": "hive_master",
+            "/conductor": "conductor",
+        }.get(head, "")
+        if not role or not parent_log:
+            return ""
+        return (
+            "\n\n[会话追踪要求]\n"
+            f"当前前台会话日志: {parent_log}\n"
+            "如果你按 SOP 启动任何后台 GenericAgent/worker 进程，启动命令必须让子进程继承以下环境变量：\n"
+            f"- GA_PARENT_LOG={parent_log}\n"
+            f"- GA_SESSION_ROLE={role}\n"
+            "若启动 hive worker，则 worker 进程使用 GA_SESSION_ROLE=hive_worker。\n"
+            "不要省略这些变量；它们用于 TUI 历史会话列表区分主会话和子会话。\n"
+            "[/会话追踪要求]"
+        )
+
+    def _mark_slash_launcher_session(self, head: str, sess: AgentSession) -> None:
+        role = {
+            "/goal": "goal_launcher",
+            "/hive": "hive_launcher",
+            "/conductor": "conductor",
+        }.get(head, "")
+        if not role or sess.agent is None:
+            return
+        log_path = getattr(sess.agent, "log_path", "") or ""
+        if not log_path:
+            return
+        try:
+            session_meta.set_meta(log_path, role=role)
+        except Exception:
+            return
+        sess.sidebar_meta_sig = ()
+
     def _cmd_slash_inject(self, args, raw):
         """`/update /autorun /morphling /goal /hive /conductor` → prompt
         injection.  We strip the leading slash command from `raw`, hand the
@@ -4968,6 +5056,9 @@ class GenericAgentTUI(App[None]):
         if sess.status == "running":
             self._system(f"#{sess.agent_id} 正在跑，/stop 后再发。")
             return
+        self._mark_slash_launcher_session(head, sess)
+        parent_log = getattr(sess.agent, "log_path", "") if sess.agent is not None else ""
+        prompt += self._slash_session_tracking_prompt(head, parent_log)
         # Keep the user's original `/cmd ...` as the visible bubble so the
         # transcript stays self-explanatory; the agent sees the long prompt.
         self.submit_user_message(prompt, display_text=text or head)

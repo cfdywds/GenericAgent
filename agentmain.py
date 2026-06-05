@@ -42,6 +42,19 @@ def get_system_prompt():
     prompt += get_global_memory()
     return prompt
 
+
+def _default_session_role_from_argv() -> str:
+    argv = " ".join(sys.argv).replace("\\", "/").lower()
+    if "reflect/goal_mode.py" in argv:
+        return "goal_child"
+    if "reflect/agent_team_worker.py" in argv:
+        return "hive_worker"
+    if "--reflect" in argv:
+        return "reflect"
+    if "--task" in argv:
+        return "task"
+    return "main"
+
 class GenericAgent:
     def __init__(self):
         os.makedirs(os.path.join(script_dir, 'temp'), exist_ok=True)
@@ -55,6 +68,11 @@ class GenericAgent:
         self.force_non_stream = False
         logid = f'{(time.time_ns() + random.randrange(1_000_000)) % 1_000_000:06d}'
         self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{logid}.txt')
+        try:
+            from frontends import session_meta
+            session_meta.register_from_env(self.log_path, default_role=_default_session_role_from_argv())
+        except Exception as e:
+            print(f'[WARN] session metadata init failed: {e}')
         self.load_llm_sessions()
 
     def load_llm_sessions(self):

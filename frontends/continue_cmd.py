@@ -362,6 +362,13 @@ def _snapshot_current_log(pid=None):
     snapshot = os.path.join(_LOG_DIR, f'model_responses_snapshot_{pid}_{stamp}_{time.time_ns() % 1_000_000_000:09d}.txt')
     with open(snapshot, 'w', encoding='utf-8', errors='replace') as fh:
         fh.write(content)
+    try:
+        import session_meta
+        meta = session_meta.get_meta(path)
+        if meta:
+            session_meta.set_meta(snapshot, **meta)
+    except Exception:
+        pass
     with open(path, 'w', encoding='utf-8', errors='replace'):
         pass
     return snapshot
