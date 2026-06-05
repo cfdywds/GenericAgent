@@ -1,0 +1,60 @@
+{
+  "name": "Ameath",
+  "version": "1.0.0",
+  "author": "codex-pets",
+  "source": "https://codex-pets.net/#/pets/ameath",
+  "description": "爱弥斯 / Ameath - pink flowing hair, teal accents, white-and-navy frilled outfit",
+  "style": "chibi",
+  "format": "sprite",
+  "size": { "width": 128, "height": 156 },
+  "animations": {
+    "idle": {
+      "file": "skin.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 6,
+        "columns": 8,
+        "fps": 10,
+        "startFrame": 0
+      }
+    },
+    "walk": {
+      "file": "skin.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 8,
+        "columns": 8,
+        "fps": 12,
+        "startFrame": 8
+      }
+    },
+    "run": {
+      "file": "skin.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 8,
+        "columns": 8,
+        "fps": 14,
+        "startFrame": 16
+      }
+    },
+    "sprint": {
+      "file": "skin.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 8,
+        "columns": 8,
+        "fps": 16,
+        "startFrame": 24
+      }
+    }
+  }
+}
