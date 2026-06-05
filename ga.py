@@ -1,4 +1,4 @@
-import sys, os, re, json, time, threading, importlib
+import sys, os, re, json, time, threading, importlib, ast
 from datetime import datetime
 from pathlib import Path
 import tempfile, traceback, subprocess, itertools, collections, difflib, shutil
@@ -13,14 +13,150 @@ def safe_print(*args, **kwargs):
     try: print(*args, **kwargs)
     except: pass
 
+def _compact_code_for_scan(code):
+    text = re.sub(r'(?m)#.*$', '', code or '')
+    return re.sub(r'\s+', ' ', text).strip().lower()
+
+
+_BROAD_KILL_PATTERNS = [
+    (r'\btaskkill\b[^;&|]*(?:/im\s+(?:python|pythonw|py)(?:\.exe)?\b|/pid\s+\$pid\b)', "taskkill targets Python or the current PID"),
+    (r'\bstop-process\b[^;&|]*(?:-name\s+(?:python|pythonw|py)\b|-id\s+\$pid\b)', "Stop-Process targets Python or the current PID"),
+    (r'\bget-process\b[^;&|]*(?:python|pythonw|py)\b[^;&|]*\|\s*stop-process\b', "pipeline stops Python processes"),
+    (r'\b(?:pkill|killall)\b[^;&|]*(?:python|pythonw|py)\b', "pkill/killall targets Python processes"),
+]
+
+
+def _unsafe_shell_run_reason(code):
+    text = _compact_code_for_scan(code)
+    if not text:
+        return None
+    patterns = _BROAD_KILL_PATTERNS + [
+        (r'\bkill\s+-9\s+\$\$\b', "kill targets the current shell process"),
+    ]
+    for pattern, reason in patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return reason
+    return None
+
+
+def _literal_str(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_str(node.left)
+        right = _literal_str(node.right)
+        if left is not None and right is not None:
+            return left + right
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            else:
+                return None
+        return "".join(parts)
+    return None
+
+
+def _python_aliases(tree):
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                root = item.name.split(".", 1)[0]
+                if root in {"os", "subprocess"}:
+                    aliases[item.asname or root] = item.name
+        elif isinstance(node, ast.ImportFrom) and node.module in {"os", "subprocess"}:
+            for item in node.names:
+                aliases[item.asname or item.name] = f"{node.module}.{item.name}"
+    return aliases
+
+
+def _qualified_name(node, aliases):
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        base = _qualified_name(node.value, aliases)
+        return f"{base}.{node.attr}" if base else None
+    if isinstance(node, ast.Call):
+        func = _qualified_name(node.func, aliases)
+        if func == "getattr" and len(node.args) >= 2:
+            base = _qualified_name(node.args[0], aliases)
+            attr = _literal_str(node.args[1])
+            return f"{base}.{attr}" if base and attr else None
+        if func == "__import__" and node.args:
+            return _literal_str(node.args[0])
+    return None
+
+
+def _iter_call_string_literals(node):
+    for child in ast.walk(node):
+        value = _literal_str(child)
+        if value:
+            yield value
+
+
+def _unsafe_python_run_reason(code, depth=0):
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError:
+        return _unsafe_shell_run_reason(code)
+
+    aliases = _python_aliases(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            reason = _unsafe_shell_run_reason(node.value)
+            if reason:
+                return reason
+        if not isinstance(node, ast.Call):
+            continue
+
+        func = _qualified_name(node.func, aliases)
+        if func == "os._exit":
+            return "os._exit() terminates the interpreter immediately"
+
+        if func == "os.kill" and node.args:
+            target = node.args[0]
+            target_func = _qualified_name(target.func, aliases) if isinstance(target, ast.Call) else _qualified_name(target, aliases)
+            if target_func == "os.getpid":
+                return "os.kill(os.getpid()) targets the current process"
+            if target_func == "os.getppid":
+                return "os.kill(os.getppid()) targets the parent GA process"
+
+        if func and func.startswith("subprocess."):
+            joined = " ".join(_iter_call_string_literals(node))
+            reason = _unsafe_shell_run_reason(joined)
+            if reason:
+                return f"subprocess call contains broad process-kill command: {reason}"
+
+        if depth < 2 and func in {"eval", "exec", "builtins.eval", "builtins.exec"} and node.args:
+            embedded = _literal_str(node.args[0])
+            if embedded:
+                reason = _unsafe_python_run_reason(embedded, depth + 1)
+                if reason:
+                    return reason
+    return None
+
+def _unsafe_code_run_reason(code, code_type):
+    """Block obvious commands that can terminate the running GA process."""
+    code_type = (code_type or "").lower()
+    if code_type in ["python", "py"]:
+        return _unsafe_python_run_reason(code)
+    if code_type in ["powershell", "bash", "sh", "shell", "ps1", "pwsh"]:
+        return _unsafe_shell_run_reason(code)
+    return None
+
 def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000, myprint=safe_print):
     """代码执行器
     python: 运行复杂的 .py 脚本（文件模式）
     powershell/bash: 运行单行指令（命令模式）
     优先使用python，仅在必要系统操作时使用powershell"""
+    cwd = cwd or os.path.join(script_dir, 'temp'); tmp_path = None
     preview = (code[:60].replace('\n', ' ') + '...') if len(code) > 60 else code.strip()
     yield f"[Action] Running {code_type} in {os.path.basename(cwd)}: {preview}\n"
-    cwd = cwd or os.path.join(script_dir, 'temp'); tmp_path = None
+    unsafe_reason = _unsafe_code_run_reason(code, code_type)
+    if unsafe_reason:
+        return {"status": "error", "msg": f"已阻止不安全的 code_run: {unsafe_reason}"}
     if code_type in ["python", "py"]:
         tmp_file = tempfile.NamedTemporaryFile(suffix=".ai.py", delete=False, mode='w', encoding='utf-8', dir=code_cwd)
         cr_header = os.path.join(script_dir, 'assets', 'code_run_header.py')
@@ -299,15 +435,10 @@ class GenericAgentHandler(BaseHandler):
         code_cwd = os.path.normpath(self.cwd)
         maxlen = 10000 // args.get('_tool_num', 1)
         if code_type == 'python' and args.get("inline_eval"):
-            ns = {'handler':self, 'parent':self.parent, 'history':json.dumps(self.parent.llmclient.backend.history)}
-            old_cwd = os.getcwd()
-            try:
-                os.chdir(cwd)
-                try:
-                    try: result = repr(eval(code, ns))
-                    except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
-                except Exception as e: result = f'Error: {e}'
-            finally: os.chdir(old_cwd)
+            result = {
+                "status": "error",
+                "msg": "inline_eval disabled: it runs inside the GA process and can terminate the agent. Use normal python code_run instead."
+            }
         else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal, maxlen=maxlen, myprint=self.print)
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)

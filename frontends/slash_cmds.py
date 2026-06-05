@@ -22,6 +22,7 @@ either depending on the other.
 from __future__ import annotations
 
 import json
+import functools
 import os
 import shutil
 import sys
@@ -394,28 +395,95 @@ def start_service(name: str) -> tuple[bool, str]:
 #   • A registry tied to this process dies when the TUI restarts, but the
 #     services keep running (CREATE_NEW_PROCESS_GROUP).  Cmdline scan is the
 #     only single source of truth across launchers, surviving restarts.
-# Trade-off: it costs ~30ms per /scheduler open, and matches by cmdline tail,
-# so two checkouts of GA can collide.  We accept that — running two GAs out
-# of two clones is already an unsupported configuration.
+# Trade-off: cmdline/cwd inspection costs a little more than substring
+# matching, but it avoids stopping a service from another checkout just
+# because both command lines contain "reflect/foo.py".
 
-def _match_service(cmdline: list[str], svc: dict) -> bool:
-    """Does this OS process belong to `svc`?  Match on the trailing script
-    arg (`reflect/foo.py` for reflect tasks, `frontends/bar.py` for apps),
-    which is invariant across `python` vs `pythonw` vs venv shims.
+@functools.lru_cache(maxsize=512)
+def _norm_path_cached(path_str: str) -> str:
+    try:
+        return os.path.normcase(str(Path(path_str).resolve(strict=False)))
+    except Exception:
+        return os.path.normcase(os.path.abspath(path_str))
 
-    Reflect detection used to require BOTH `agentmain.py` AND the reflect
-    path in cmdline.  That rejected tasks launched directly (`python
-    reflect/scheduler.py`) by launch.pyw, dev scripts, or by an earlier
-    TUI run that used a different launcher — they showed unticked in
-    /scheduler even when alive.  Path-only match handles both styles; the
-    Python-process pre-filter in `running_services` keeps false positives
-    (greps, editors with the file open) from sneaking in."""
-    if not cmdline:
+
+def _norm_path(p: Path | str) -> str:
+    return _norm_path_cached(str(p))
+
+
+def _cmdline_python_paths(cmdline: list[str], cwd: str | None = None) -> list[tuple[int, str]]:
+    """Return normalized .py path args from a process cmdline."""
+    out: list[tuple[int, str]] = []
+    base = Path(cwd) if cwd else None
+    for i, raw in enumerate(cmdline or []):
+        arg = (raw or "").strip().strip('"')
+        if not arg or arg.startswith("-"):
+            continue
+        if Path(arg).suffix.lower() != ".py":
+            continue
+        p = Path(arg)
+        if not p.is_absolute():
+            if base is None:
+                continue
+            p = base / p
+        out.append((i, _norm_path(p)))
+    return out
+
+
+def _service_expected_path(svc: dict) -> str:
+    return _norm_path(_ROOT / svc["name"])
+
+
+def _match_service(cmdline: list[str], svc: dict, cwd: str | None = None) -> bool:
+    """Does this OS process belong to `svc`?
+
+    We match resolved Python script arguments, not raw substrings.  Relative
+    args are resolved against the process cwd, so another GA checkout with the
+    same service name no longer collides with this one.
+    """
+    paths = _cmdline_python_paths(cmdline, cwd)
+    if not paths:
         return False
-    rel = svc["name"]  # 'reflect/foo.py' | 'frontends/bar.py'
-    rel_norm = rel.replace("/", os.sep)
-    return any(rel_norm in (a or "") or rel in (a or "")
-               for a in cmdline)
+    expected = _service_expected_path(svc)
+    first_script = paths[0][1]
+    if first_script == expected:
+        return True
+
+    cmd_words = {(a or "").lower() for a in cmdline}
+    has_expected_arg = any(p == expected for _, p in paths)
+    if not has_expected_arg:
+        return False
+
+    if svc.get("kind") == "reflect":
+        agentmain = _norm_path(_ROOT / "agentmain.py")
+        return "--reflect" in cmd_words or first_script == agentmain
+
+    if svc.get("kind") == "frontend":
+        lower = [(a or "").lower() for a in cmdline]
+        return "streamlit" in lower and "run" in lower
+
+    return False
+
+
+def _service_for_name(name: str) -> dict | None:
+    svcs = list_launchable_services()
+    svc = next((s for s in svcs if s["name"] == name), None)
+    if svc is None:
+        cand = "reflect/" + name + ".py"
+        svc = next((s for s in svcs if s["name"] == cand), None)
+    return svc
+
+
+def _is_current_process_family(proc) -> bool:
+    try:
+        pid = proc.pid
+        if pid == os.getpid():
+            return True
+        current = proc.__class__(os.getpid())
+        ancestors = {p.pid for p in current.parents()}
+        return pid in ancestors
+    except Exception:
+        return False
 
 
 # 2s TTL cache + name-prefilter: ~2.1s → ~1.0s cold, ~0ms warm.
@@ -450,10 +518,11 @@ def running_services(use_cache: bool = True) -> dict[str, int]:
             if "python" not in nm and "py.exe" not in nm:
                 continue
             cmd = proc.cmdline()
+            cwd = proc.cwd()
         except Exception:
             continue
         for svc in svcs:
-            if svc["name"] not in out and _match_service(cmd, svc):
+            if svc["name"] not in out and _match_service(cmd, svc, cwd):
                 out[svc["name"]] = proc.info["pid"]
                 break
     _RUNNING_CACHE = (time.time(), dict(out))
@@ -472,26 +541,69 @@ def stop_service(name: str) -> tuple[bool, str]:
         import psutil  # type: ignore
     except Exception:
         return False, "未安装 psutil，无法停止服务"
-    running = running_services()
-    pid = running.get(name)
+    svc = _service_for_name(name)
+    if svc is None:
+        return False, f"未知服务: {name}"
+    running = running_services(use_cache=False)
+    pid = running.get(svc["name"])
     if pid is None:
         return False, f"{name} 未在运行"
     try:
         parent = psutil.Process(pid)
-        kids = parent.children(recursive=True)
-        for p in [parent, *kids]:
+        try:
+            created_at = parent.create_time()
+            cmd = parent.cmdline()
+            cwd = parent.cwd()
+        except Exception:
+            return False, f"拒绝停止 {name}: 无法验证目标 PID 身份"
+        if not _match_service(cmd, svc, cwd):
+            invalidate_running_cache()
+            return False, f"拒绝停止 {name}: 目标 PID 已不匹配服务身份"
+        if _is_current_process_family(parent):
+            return False, f"拒绝停止 {name}: 目标 PID 属于当前 GA 进程树"
+        try:
+            if parent.create_time() != created_at:
+                invalidate_running_cache()
+                return False, f"拒绝停止 {name}: PID 已被回收重用"
+        except psutil.NoSuchProcess:
+            invalidate_running_cache()
+            return True, f"{name} 已退出"
+        except Exception:
+            return False, f"拒绝停止 {name}: 无法复核目标 PID 身份"
+
+        targets = []
+        for p in [parent, *parent.children(recursive=True)]:
             try:
+                targets.append((p, p.create_time()))
+            except psutil.NoSuchProcess:
+                pass
+            except Exception:
+                continue
+        for p, seen_at in targets:
+            try:
+                if p.create_time() != seen_at:
+                    if p.pid == pid:
+                        invalidate_running_cache()
+                        return False, f"拒绝停止 {name}: PID 已被回收重用"
+                    continue
                 p.terminate()
+            except psutil.NoSuchProcess:
+                pass
             except Exception:
                 pass
-        gone, alive = psutil.wait_procs([parent, *kids], timeout=3.0)
+        gone, alive = psutil.wait_procs([p for p, _ in targets], timeout=3.0)
+        target_birth = {p.pid: seen_at for p, seen_at in targets}
         for p in alive:
             try:
+                if p.create_time() != target_birth.get(p.pid):
+                    continue
                 p.kill()
+            except psutil.NoSuchProcess:
+                pass
             except Exception:
                 pass
         invalidate_running_cache()
-        return True, f"已停止 {name} (pid={pid})"
+        return True, f"已停止 {svc['name']} (pid={pid})"
     except psutil.NoSuchProcess:
         invalidate_running_cache()
         return True, f"{name} 已退出"

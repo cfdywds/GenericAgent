@@ -1,4 +1,5 @@
 import io
+import math
 import os
 import pathlib
 import sys
@@ -26,7 +27,7 @@ def render_plain(renderable, width: int = 80) -> str:
 
 
 class SidebarHelperTests(unittest.TestCase):
-    def test_sidebar_sessions_current_then_running_then_recent_activity(self):
+    def test_sidebar_sessions_running_then_recent_activity_without_current_pin(self):
         current = tui.AgentSession(agent_id=1, name="current", status="idle")
         old_history = tui.AgentSession(
             agent_id=2,
@@ -44,7 +45,7 @@ class SidebarHelperTests(unittest.TestCase):
             {2: old_history, 4: recent, 1: current, 3: running}, current_id=1
         )
 
-        self.assertEqual([sid for sid, _ in ordered], [1, 3, 4, 2])
+        self.assertEqual([sid for sid, _ in ordered], [3, 1, 4, 2])
 
     def test_sidebar_sessions_tie_breaks_by_descending_id(self):
         first = tui.AgentSession(agent_id=1, name="first", status="idle")
@@ -179,6 +180,23 @@ class SidebarHelperTests(unittest.TestCase):
         self.assertIn("[goal]", label)
         self.assertIn("4轮", label)
 
+    def test_sidebar_sort_at_skips_nan_and_inf(self):
+        nan_sess = tui.AgentSession(agent_id=21, name="nan")
+        nan_sess.sidebar_sort_at = math.nan
+        nan_sess.sidebar_activity_at = 200.0
+
+        inf_sess = tui.AgentSession(agent_id=22, name="inf")
+        inf_sess.sidebar_sort_at = math.inf
+        inf_sess.sidebar_activity_at = math.inf
+        inf_sess.created_at = 300.0
+
+        self.assertEqual(tui._sidebar_sort_at(nan_sess), 200.0)
+        self.assertEqual(tui._sidebar_sort_at(inf_sess), 300.0)
+
+    def test_cell_width_counts_emoji_as_wide(self):
+        self.assertEqual(tui._cell_width("🔥 Hot"), 6)
+        self.assertEqual(tui._cell_width("❤️"), 2)
+
 
 class SidebarRenderTests(unittest.TestCase):
     def test_sidebar_rows_use_display_order_numbers_not_internal_session_ids(self):
@@ -210,8 +228,8 @@ class SidebarRenderTests(unittest.TestCase):
             current_id=1,
         )
 
-        self.assertEqual([(row.sid, row.display_no) for row in rows], [(1, 1), (20, 2), (10, 3)])
-        self.assertEqual(tui.sidebar_sid_at_visual_row({1: current, 10: first_history, 20: second_history}, 1, 2), 20)
+        self.assertEqual([(row.sid, row.display_no) for row in rows], [(20, 1), (10, 2), (1, 3)])
+        self.assertEqual(tui.sidebar_sid_at_visual_row({1: current, 10: first_history, 20: second_history}, 1, 2), 10)
 
     def test_sidebar_history_row_has_distinct_styled_number_name_time_and_rounds(self):
         sess = tui.AgentSession(
@@ -311,7 +329,7 @@ class SidebarRenderTests(unittest.TestCase):
 
         output = render_plain(tui.render_sidebar({1: current, 2: running}, current_id=1))
 
-        self.assertIn("● #2 runner", output)
+        self.assertIn("● #1 runner", output)
 
     def test_render_sidebar_distinguishes_goal_history_from_main_history(self):
         sess = tui.AgentSession(

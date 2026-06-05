@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
+import math
 import os
 import queue
 import re
@@ -24,6 +25,7 @@ import threading
 import time
 import subprocess
 import shutil
+import unicodedata
 
 # Local: cross-platform shortcut-label formatter (Win/Linux "Ctrl+B" vs mac "⌃B").
 # Imported early because _TIPS at module load time uses fmt_key().
@@ -1353,6 +1355,7 @@ class AgentSession:
     sidebar_summary: str = ""
     sidebar_kind: str = "main"
     sidebar_activity_at: float = 0.0
+    sidebar_sort_at: float = 0.0
     sidebar_meta_sig: tuple = field(default_factory=tuple, repr=False)
 
 
@@ -2541,15 +2544,69 @@ def render_bottombar(quit_armed: bool = False, rewind_armed: bool = False) -> Ta
 _SIDEBAR_META_VERSION = 2
 
 
+def _char_cell_width(ch: str) -> int:
+    if not ch:
+        return 0
+    cp = ord(ch)
+    if unicodedata.combining(ch) or cp in (0x200D, 0xFE0E, 0xFE0F):
+        return 0
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 2
+    if 0x1F000 <= cp <= 0x1FAFF or 0x2600 <= cp <= 0x27BF:
+        return 2
+    return 1
+
+
 def _truncate(text: str, max_w: int) -> str:
-    import unicodedata
+    if max_w <= 0:
+        return ""
     w, out = 0, []
     for ch in text:
-        wch = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        wch = _char_cell_width(ch)
         if w + wch > max_w:
             out.append("…"); break
         out.append(ch); w += wch
     return "".join(out)
+
+
+def _cell_width(text: str) -> int:
+    return sum(_char_cell_width(ch) for ch in str(text or ""))
+
+
+def _ellipsize_cells(text: str, width: int) -> str:
+    width = max(1, int(width or 1))
+    if width == 1:
+        return "…"
+    base = _truncate(text, width - 1)
+    if base.endswith("…"):
+        base = base[:-1]
+    return base + "…"
+
+
+def _wrap_cells(text: str, width: int, *, max_lines: int = 3) -> list[str]:
+    text = _sidebar_clean_text(text)
+    width = max(1, int(width or 1))
+    if not text:
+        return [""]
+    lines: list[str] = []
+    line: list[str] = []
+    used = 0
+    for ch in text:
+        cw = _cell_width(ch)
+        if line and used + cw > width:
+            lines.append("".join(line).rstrip())
+            if len(lines) >= max_lines:
+                lines[-1] = _ellipsize_cells(lines[-1], width)
+                return lines
+            line = []
+            used = 0
+            if ch.isspace():
+                continue
+        line.append(ch)
+        used += cw
+    if line:
+        lines.append("".join(line).rstrip())
+    return lines or [""]
 
 
 def _short_age(mtime: float) -> str:
@@ -2717,14 +2774,26 @@ def _sidebar_history_len(sess: AgentSession) -> int:
 
 
 def _sidebar_activity(sess: AgentSession) -> float:
+    if sess.sidebar_activity_at:
+        return float(sess.sidebar_activity_at)
     if sess.lazy_history_path and sess.agent is None:
-        return float(sess.sidebar_activity_at or sess.lazy_history_mtime or 0.0)
+        return float(sess.lazy_history_mtime or 0.0)
     return max(
-        float(sess.sidebar_activity_at or 0.0),
         _sidebar_log_mtime(sess),
         float(sess.last_activity_at or 0.0),
         float(sess.created_at or 0.0),
     )
+
+
+def _sidebar_sort_at(sess: AgentSession) -> float:
+    for value in (sess.sidebar_sort_at, _sidebar_activity(sess), sess.created_at, 0.0):
+        try:
+            val = float(value or 0.0)
+        except (TypeError, ValueError):
+            val = 0.0
+        if math.isfinite(val) and val:
+            return val
+    return 0.0
 
 
 def refresh_sidebar_metadata(sess: AgentSession, name_lookup=None) -> AgentSession:
@@ -2776,9 +2845,8 @@ def refresh_sidebar_metadata(sess: AgentSession, name_lookup=None) -> AgentSessi
 def sidebar_ordered_sessions(sessions: dict[int, AgentSession], current_id: Optional[int]):
     def key(item):
         sid, sess = item
-        current_rank = 0 if sid == current_id else 1
         running_rank = 0 if sess.status == "running" else 1
-        return (current_rank, running_rank, -_sidebar_activity(sess), -sid)
+        return (running_rank, -_sidebar_sort_at(sess), -sid)
     return sorted(sessions.items(), key=key)
 
 
@@ -2793,6 +2861,8 @@ def _sidebar_render_preview(sess: AgentSession) -> str:
 def _sidebar_created_at(sess: AgentSession) -> float:
     if sess.lazy_history_path and sess.agent is None:
         return float(sess.lazy_history_mtime or 0.0)
+    if sess.sidebar_sort_at:
+        return float(sess.sidebar_sort_at)
     return max(float(sess.created_at or 0.0), _sidebar_log_mtime(sess))
 
 
@@ -2827,29 +2897,41 @@ class SidebarRow:
     rounds: str
     age: str
     preview: str
+    title_lines: list[str]
 
     @property
     def row_count(self) -> int:
-        return 2 + (1 if self.preview else 0)
+        return max(1, len(self.title_lines)) + 1 + (1 if self.preview else 0)
 
 
-def sidebar_render_rows(sessions: dict[int, AgentSession], current_id: Optional[int]) -> list[SidebarRow]:
+def _sidebar_title_text_width(content_width: int, display_no: int) -> int:
+    prefix_w = _cell_width(f"#{display_no} ")
+    return max(6, int(content_width or 30) - 2 - 4 - prefix_w)
+
+
+def sidebar_render_rows(
+    sessions: dict[int, AgentSession],
+    current_id: Optional[int],
+    content_width: int = 30,
+) -> list[SidebarRow]:
     rows: list[SidebarRow] = []
     for display_no, (sid, sess) in enumerate(sidebar_ordered_sessions(sessions, current_id), start=1):
         if not sess.sidebar_title:
             refresh_sidebar_metadata(sess)
+        title = sess.sidebar_title or sess.name
         rows.append(SidebarRow(
             sid=sid,
             sess=sess,
             display_no=display_no,
             active=sid == current_id,
             running=sess.status == "running",
-            title=sess.sidebar_title or sess.name,
+            title=title,
             summary=sess.sidebar_summary or _sidebar_status_text(sess),
             created_time=_sidebar_created_time(sess),
             rounds=_sidebar_rounds_label(sess),
             age=_short_age(sess.sidebar_activity_at) if sess.sidebar_activity_at else "",
             preview=_sidebar_render_preview(sess),
+            title_lines=_wrap_cells(title, _sidebar_title_text_width(content_width, display_no)),
         ))
     return rows
 
@@ -2858,10 +2940,11 @@ def sidebar_sid_at_visual_row(
     sessions: dict[int, AgentSession],
     current_id: Optional[int],
     visual_row: int,
+    content_width: int = 30,
 ) -> Optional[int]:
     if visual_row < 0:
         return None
-    for row in sidebar_render_rows(sessions, current_id):
+    for row in sidebar_render_rows(sessions, current_id, content_width):
         if visual_row < row.row_count:
             return row.sid
         visual_row -= row.row_count
@@ -2873,9 +2956,15 @@ def _sidebar_row_count(sess: AgentSession) -> int:
 
 
 def sidebar_render_row_text(row: SidebarRow) -> tuple[Text, Text]:
+    title_style = f"bold {C_CHIP_NAME}" if row.active else C_MUTED
+    prefix = f"#{row.display_no} "
+    title_lines = row.title_lines or [row.title]
     title = Text()
-    title.append(f"#{row.display_no} ", style=C_CHIP_TASKS)
-    title.append(_truncate(row.title, 28), style=f"bold {C_CHIP_NAME}" if row.active else C_MUTED)
+    title.append(prefix, style=C_CHIP_TASKS)
+    title.append(title_lines[0], style=title_style)
+    for line in title_lines[1:]:
+        title.append("\n" + (" " * _cell_width(prefix)))
+        title.append(line, style=title_style)
 
     meta = Text()
     meta.append(row.created_time, style=C_CHIP_TIME)
@@ -2889,7 +2978,11 @@ def sidebar_render_row_text(row: SidebarRow) -> tuple[Text, Text]:
     return title, meta
 
 
-def render_sidebar(sessions: dict[int, AgentSession], current_id: Optional[int]) -> Table:
+def render_sidebar(
+    sessions: dict[int, AgentSession],
+    current_id: Optional[int],
+    content_width: int = 30,
+) -> Table:
     outer = Table.grid(expand=True)
     outer.add_column()
 
@@ -2899,7 +2992,7 @@ def render_sidebar(sessions: dict[int, AgentSession], current_id: Optional[int])
     sess_tbl.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
     sess_tbl.add_column(width=4, justify="right", no_wrap=True, overflow="ellipsis")
     blank = Text("")
-    for row in sidebar_render_rows(sessions, current_id):
+    for row in sidebar_render_rows(sessions, current_id, content_width):
         style = SEL if row.active else None
         title_text, meta_text = sidebar_render_row_text(row)
         sess_tbl.add_row(
@@ -3283,7 +3376,13 @@ class GenericAgentTUI(App[None]):
         self._install_intervene_replay_hook(sess)
         return agent
 
-    def _touch_session_activity(self, sess: Optional[AgentSession] = None, when: Optional[float] = None) -> None:
+    def _touch_session_activity(
+        self,
+        sess: Optional[AgentSession] = None,
+        when: Optional[float] = None,
+        *,
+        update_sort: bool = True,
+    ) -> None:
         if sess is None:
             if self.current_id is None:
                 return
@@ -3291,6 +3390,8 @@ class GenericAgentTUI(App[None]):
         ts = float(when or time.time())
         sess.last_activity_at = ts
         sess.sidebar_activity_at = ts
+        if update_sort:
+            sess.sidebar_sort_at = ts
         sess.sidebar_meta_sig = ()
 
     def add_session(self, name: Optional[str] = None) -> AgentSession:
@@ -3348,6 +3449,7 @@ class GenericAgentTUI(App[None]):
                 lazy_history_mtime=mtime,
                 lazy_history_preview=(first or "（无法预览）").replace("\n", " ").strip(),
                 lazy_history_rounds=int(n or 0),
+                sidebar_sort_at=float(mtime or 0.0),
             )
             refresh_sidebar_metadata(
                 hist,
@@ -3359,7 +3461,20 @@ class GenericAgentTUI(App[None]):
         if added:
             self._refresh_sidebar()
 
-    def _restore_session_from_path(self, sess: AgentSession, path: str, *, defer_finish: bool = True) -> str:
+    def _restore_session_from_path(
+        self,
+        sess: AgentSession,
+        path: str,
+        *,
+        defer_finish: bool = True,
+    ) -> str:
+        try:
+            path_mtime = float(os.path.getmtime(path))
+        except OSError:
+            path_mtime = 0.0
+        restored_sort_at = float(path_mtime or sess.lazy_history_mtime or sess.sidebar_sort_at or 0.0)
+        restored_activity_at = float(path_mtime or sess.lazy_history_mtime or sess.sidebar_activity_at or restored_sort_at or 0.0)
+        restored_title = _sidebar_clean_text(sess.sidebar_title or sess.name)
         if sess.agent is None:
             self._start_agent_for_session(sess)
         from continue_cmd import reset_conversation, restore
@@ -3407,14 +3522,22 @@ class GenericAgentTUI(App[None]):
                     sess.name = nm
                     if current_log:
                         session_names.migrate(path, current_log)
+                elif restored_title:
+                    sess.name = restored_title
             except Exception:
-                pass
+                if restored_title:
+                    sess.name = restored_title
             sess.status = "idle"
             sess.lazy_history_path = None
             sess.lazy_history_mtime = 0.0
             sess.lazy_history_preview = ""
             sess.lazy_history_rounds = 0
-            self._touch_session_activity(sess)
+            if restored_activity_at:
+                sess.sidebar_activity_at = restored_activity_at
+            if restored_sort_at:
+                sess.sidebar_sort_at = restored_sort_at
+            sess.last_activity_at = restored_activity_at or sess.last_activity_at
+            sess.sidebar_meta_sig = ()
             self._remount_current_session()
             self._refresh_all()
         if defer_finish:
@@ -3825,7 +3948,12 @@ class GenericAgentTUI(App[None]):
         # for content clicks; add it only when Textual targets the scroll shell.
         if y < 0:
             return
-        sid = sidebar_sid_at_visual_row(self.sessions, self.current_id, y)
+        sid = sidebar_sid_at_visual_row(
+            self.sessions,
+            self.current_id,
+            y,
+            self._sidebar_content_width(),
+        )
         if sid is not None and sid != self.current_id:
             self._switch_session(sid)
 
@@ -5806,6 +5934,20 @@ class GenericAgentTUI(App[None]):
         except Exception:
             pass
 
+    def _sidebar_content_width(self) -> int:
+        try:
+            content = self.query_one("#sidebar-content", Static)
+            w = int(content.content_region.width or content.size.width or 0)
+        except Exception:
+            w = 0
+        if w <= 0:
+            try:
+                sidebar = self.query_one("#sidebar", VerticalScroll)
+                w = int(sidebar.content_region.width or sidebar.size.width or 0)
+            except Exception:
+                w = 0
+        return max(12, w or 30)
+
     def _refresh_sidebar(self):
         if not self.is_mounted: return
         try:
@@ -5815,7 +5957,9 @@ class GenericAgentTUI(App[None]):
             lookup = None
         for sess in self.sessions.values():
             refresh_sidebar_metadata(sess, name_lookup=lookup)
-        self.query_one("#sidebar-content", Static).update(render_sidebar(self.sessions, self.current_id))
+        self.query_one("#sidebar-content", Static).update(
+            render_sidebar(self.sessions, self.current_id, self._sidebar_content_width())
+        )
 
     def _at_bottom(self, container) -> bool:
         try:
