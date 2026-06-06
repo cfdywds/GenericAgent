@@ -6,6 +6,7 @@ import sys
 import time
 import tempfile
 import unittest
+from itertools import count
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -217,7 +218,7 @@ class SidebarHelperTests(unittest.TestCase):
 
 
 class SidebarRenderTests(unittest.TestCase):
-    def test_sidebar_rows_use_display_order_numbers_not_internal_session_ids(self):
+    def test_sidebar_rows_keep_internal_display_order_for_click_mapping(self):
         current = tui.AgentSession(agent_id=1, name="current", status="idle")
         current.sidebar_title = "current"
         first_history = tui.AgentSession(
@@ -249,7 +250,45 @@ class SidebarRenderTests(unittest.TestCase):
         self.assertEqual([(row.sid, row.display_no) for row in rows], [(20, 1), (10, 2), (1, 3)])
         self.assertEqual(tui.sidebar_sid_at_visual_row({1: current, 10: first_history, 20: second_history}, 1, 3), 10)
 
-    def test_sidebar_history_row_has_distinct_styled_number_name_time_and_rounds(self):
+    def test_sidebar_order_does_not_change_when_current_session_changes(self):
+        older = tui.AgentSession(agent_id=1, name="older", status="history", sidebar_sort_at=100.0)
+        newer = tui.AgentSession(agent_id=2, name="newer", status="history", sidebar_sort_at=200.0)
+        rows_when_older_current = tui.sidebar_render_rows({1: older, 2: newer}, current_id=1)
+        rows_when_newer_current = tui.sidebar_render_rows({1: older, 2: newer}, current_id=2)
+
+        self.assertEqual([row.sid for row in rows_when_older_current], [2, 1])
+        self.assertEqual([row.sid for row in rows_when_newer_current], [2, 1])
+
+    def test_sidebar_click_mapping_uses_displayed_titles_without_refreshing_names(self):
+        first_path = "D:/tmp/model_responses_first.txt"
+        first = tui.AgentSession(
+            agent_id=1,
+            name="history-first",
+            status="history",
+            lazy_history_path=first_path,
+            lazy_history_mtime=200.0,
+            lazy_history_preview="这是一个非常非常长的历史会话标题，会换很多行，导致点击区域变大",
+            lazy_history_rounds=3,
+            sidebar_sort_at=200.0,
+        )
+        second = tui.AgentSession(
+            agent_id=2,
+            name="history-second",
+            status="history",
+            lazy_history_path="D:/tmp/model_responses_second.txt",
+            lazy_history_mtime=100.0,
+            lazy_history_preview="第二个会话",
+            lazy_history_rounds=2,
+            sidebar_sort_at=100.0,
+        )
+        tui.refresh_sidebar_metadata(first, name_lookup=lambda path: "短名" if path == first_path else "")
+        tui.refresh_sidebar_metadata(second, name_lookup=lambda _path: "")
+
+        sid = tui.sidebar_sid_at_visual_row({1: first, 2: second}, None, visual_row=4, content_width=18)
+
+        self.assertEqual(sid, 2)
+
+    def test_sidebar_history_row_hides_volatile_display_number(self):
         sess = tui.AgentSession(
             agent_id=12,
             name="history-styled",
@@ -266,12 +305,37 @@ class SidebarRenderTests(unittest.TestCase):
         title_styles = {span.style for span in title_text.spans}
         meta_styles = {span.style for span in meta_text.spans}
 
-        self.assertIn(tui.C_CHIP_TASKS, title_styles)
+        self.assertNotIn("#1", title_text.plain)
+        self.assertNotIn(tui.C_CHIP_TASKS, title_styles)
         self.assertIn(f"bold {tui.C_CHIP_NAME}", title_styles)
         self.assertIn(tui.C_CHIP_TIME, meta_styles)
         self.assertIn(tui.C_GREEN, meta_styles)
         self.assertIn(time.strftime("%m-%d", time.localtime(1_783_000_000.0)), meta_text.plain)
         self.assertIn("3轮", meta_text.plain)
+
+    def test_scroll_active_session_does_not_move_when_active_row_is_visible(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        current = tui.AgentSession(agent_id=1, name="current", status="idle")
+        current.sidebar_title = "current"
+        current.sidebar_activity_at = 300.0
+        other = tui.AgentSession(agent_id=2, name="other", status="idle")
+        other.sidebar_title = "other"
+        other.sidebar_activity_at = 200.0
+        app.sessions = {1: current, 2: other}
+        app.current_id = 2
+        scroll = SimpleNamespace(
+            scroll_y=0,
+            content_region=SimpleNamespace(height=12),
+            size=SimpleNamespace(height=12),
+            scroll_to_region=lambda *args, **kwargs: None,
+        )
+
+        with patch.object(app, "query_one", return_value=scroll), \
+             patch.object(app, "_sidebar_content_width", return_value=30), \
+             patch.object(app, "call_after_refresh") as after_refresh:
+            app._scroll_active_session_into_view()
+
+        after_refresh.assert_not_called()
 
     def test_render_sidebar_uses_compact_rows_and_hides_raw_history_filename(self):
         sess = tui.AgentSession(
@@ -326,7 +390,8 @@ class SidebarRenderTests(unittest.TestCase):
 
         output = render_plain(tui.render_sidebar({7: sess}, current_id=7), width=34)
 
-        self.assertIn("#1 Browser", output)
+        self.assertIn("Browser", output)
+        self.assertNotIn("#1", output)
         self.assertIn("247", output)
 
     def test_render_sidebar_includes_short_age_column(self):
@@ -348,7 +413,9 @@ class SidebarRenderTests(unittest.TestCase):
 
         output = render_plain(tui.render_sidebar({1: current, 2: running}, current_id=1))
 
-        self.assertIn("● #1 runner", output)
+        self.assertIn("runner", output)
+        self.assertNotIn("#1 runner", output)
+        self.assertIn("running", output)
 
     def test_render_sidebar_distinguishes_goal_history_from_main_history(self):
         sess = tui.AgentSession(
@@ -388,6 +455,295 @@ class SidebarRenderTests(unittest.TestCase):
         self.assertEqual(sess.sidebar_kind, "goal_child")
         self.assertIn("└─", output)
         self.assertIn("[goal child]", output)
+
+    def test_goal_launcher_stays_grouped_with_running_child(self):
+        parent_log = "D:/tmp/model_responses_parent.txt"
+        child_log = "D:/tmp/model_responses_child.txt"
+        launcher = tui.AgentSession(agent_id=3, name="launcher", status="idle")
+        launcher.agent = SimpleNamespace(log_path=parent_log, llmclient=SimpleNamespace(backend=SimpleNamespace(history=[])))
+        launcher.sidebar_title = "记忆更新已校验完成。"
+        launcher.sidebar_activity_at = 100.0
+        child = tui.AgentSession(
+            agent_id=1,
+            name="goal-child",
+            status="running",
+            lazy_history_path=child_log,
+            lazy_history_mtime=110.0,
+            lazy_history_preview="完善手机服务器环境",
+            lazy_history_rounds=7,
+        )
+
+        def fake_meta(path):
+            if path == parent_log:
+                return {"role": "goal_launcher"}
+            if path == child_log:
+                return {"role": "goal_child", "parent_log": parent_log}
+            return {}
+
+        with patch.object(tui.session_meta, "get_meta", side_effect=fake_meta):
+            for sess in (launcher, child):
+                tui.refresh_sidebar_metadata(sess, name_lookup=lambda _path: "")
+            output = render_plain(tui.render_sidebar({3: launcher, 1: child}, current_id=3))
+            rows = tui.sidebar_render_rows({3: launcher, 1: child}, current_id=3)
+
+        self.assertEqual([row.sid for row in rows], [3, 1])
+        self.assertIn("goal running", output)
+        self.assertNotIn("goal_launcher idle", output)
+
+    def test_goal_parent_child_order_does_not_change_when_child_is_current(self):
+        parent_log = "D:/tmp/model_responses_parent.txt"
+        child_log = "D:/tmp/model_responses_child.txt"
+        launcher = tui.AgentSession(agent_id=3, name="launcher", status="idle")
+        launcher.agent = SimpleNamespace(log_path=parent_log, llmclient=SimpleNamespace(backend=SimpleNamespace(history=[])))
+        child = tui.AgentSession(
+            agent_id=1,
+            name="goal-child",
+            status="history",
+            lazy_history_path=child_log,
+            lazy_history_mtime=110.0,
+            lazy_history_preview="持续推进",
+            lazy_history_rounds=7,
+            sidebar_sort_at=110.0,
+        )
+
+        def fake_meta(path):
+            if path == parent_log:
+                return {"role": "goal_launcher"}
+            if path == child_log:
+                return {"role": "goal_child", "parent_log": parent_log}
+            return {}
+
+        with patch.object(tui.session_meta, "get_meta", side_effect=fake_meta):
+            rows_when_parent_current = tui.sidebar_render_rows({3: launcher, 1: child}, current_id=3)
+            rows_when_child_current = tui.sidebar_render_rows({3: launcher, 1: child}, current_id=1)
+
+        self.assertEqual([row.sid for row in rows_when_parent_current], [3, 1])
+        self.assertEqual([row.sid for row in rows_when_child_current], [3, 1])
+
+    def test_goal_child_groups_with_parent_when_paths_use_different_slashes(self):
+        parent_log = "D:/tmp/model_responses_parent.txt"
+        child_log = "D:/tmp/model_responses_child.txt"
+        launcher = tui.AgentSession(agent_id=3, name="launcher", status="idle")
+        launcher.agent = SimpleNamespace(log_path=parent_log, llmclient=SimpleNamespace(backend=SimpleNamespace(history=[])))
+        child = tui.AgentSession(
+            agent_id=1,
+            name="goal-child",
+            status="history",
+            lazy_history_path=child_log,
+            lazy_history_mtime=110.0,
+            lazy_history_preview="持续推进",
+            lazy_history_rounds=7,
+            sidebar_sort_at=110.0,
+        )
+
+        def fake_meta(path):
+            if path == parent_log:
+                return {"role": "goal_launcher"}
+            if path == child_log:
+                return {"role": "goal_child", "parent_log": parent_log.replace("/", "\\")}
+            return {}
+
+        with patch.object(tui.session_meta, "get_meta", side_effect=fake_meta):
+            rows = tui.sidebar_render_rows({3: launcher, 1: child}, current_id=3)
+
+        self.assertEqual([row.sid for row in rows], [3, 1])
+
+    def test_goal_child_history_uses_live_pid_as_running_status(self):
+        child_log = "D:/tmp/model_responses_child.txt"
+        child = tui.AgentSession(
+            agent_id=1,
+            name="goal-child",
+            status="history",
+            lazy_history_path=child_log,
+            lazy_history_mtime=110.0,
+            lazy_history_preview="持续推进",
+            lazy_history_rounds=7,
+        )
+
+        with patch.object(
+            tui.session_meta,
+            "get_meta",
+            return_value={"role": "goal_child", "parent_log": "D:/tmp/model_responses_parent.txt", "pid": 4242},
+        ), patch.object(tui, "_pid_is_running", return_value=True):
+            tui.refresh_sidebar_metadata(child, name_lookup=lambda _path: "")
+            output = render_plain(tui.render_sidebar({1: child}, current_id=None))
+
+        self.assertIn("running", output)
+        self.assertIn("7轮", output)
+
+    def test_history_loader_does_not_readd_materialized_history_session(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        app._ids = count(2)
+        history_log = os.path.abspath("D:/tmp/model_responses_history.txt")
+        live_log = os.path.abspath("D:/tmp/model_responses_live.txt")
+        restored = tui.AgentSession(
+            agent_id=1,
+            name="restored",
+            status="idle",
+            lazy_history_path=history_log,
+            lazy_history_mtime=110.0,
+            lazy_history_preview="已恢复的历史会话",
+            lazy_history_rounds=3,
+            agent=SimpleNamespace(log_path=live_log),
+        )
+        app.sessions = {1: restored}
+        app.current_id = 1
+
+        with patch.object(tui, "continue_list", return_value=[(history_log, 110.0, "已恢复的历史会话", 3)]):
+            added = app._load_history_sidebar_sessions(report_errors=False, refresh=False)
+
+        self.assertEqual(added, 0)
+        self.assertEqual(len(app.sessions), 1)
+
+    def test_history_loader_collapses_byte_identical_log_files(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        app._ids = count(1)
+        with tempfile.TemporaryDirectory() as tmp:
+            first_log = os.path.join(tmp, "model_responses_111111.txt")
+            second_log = os.path.join(tmp, "model_responses_222222.txt")
+            content = b"=== Prompt === 2026-06-06 01:19:14\nsame\n=== Response ===\nsame\n"
+            for path in (first_log, second_log):
+                with open(path, "wb") as fh:
+                    fh.write(content)
+
+            entries = [
+                (first_log, 1_780_679_954.0, "已改为PowerShell单bat启动", 20),
+                (second_log, 1_780_679_954.0, "已改为PowerShell单bat启动", 20),
+            ]
+            with patch.object(tui, "continue_list", return_value=entries):
+                added = app._load_history_sidebar_sessions(report_errors=False, refresh=False)
+
+        self.assertEqual(added, 1)
+        self.assertEqual(len(app.sessions), 1)
+
+    def test_history_activation_keeps_source_log_reserved_for_later_sync(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        with tempfile.TemporaryDirectory() as tmp:
+            source_log = os.path.join(tmp, "model_responses_111111.txt")
+            live_log = os.path.join(tmp, "model_responses_222222.txt")
+            content = b"=== Prompt === 2026-06-06 01:19:14\nsame\n=== Response ===\nsame\n"
+            with open(source_log, "wb") as fh:
+                fh.write(content)
+
+            sess = tui.AgentSession(
+                agent_id=1,
+                name="history",
+                status="history",
+                lazy_history_path=source_log,
+                lazy_history_mtime=1_780_679_954.0,
+                lazy_history_preview="已改为PowerShell单bat启动",
+                lazy_history_rounds=20,
+            )
+            app.sessions = {1: sess}
+            app.current_id = 1
+            fake_agent = SimpleNamespace(log_path=live_log)
+
+            def start_agent(target):
+                target.agent = fake_agent
+                return fake_agent
+
+            import continue_cmd
+
+            with patch.object(app, "_start_agent_for_session", side_effect=start_agent), \
+                 patch.object(app, "_remount_current_session"), \
+                 patch.object(app, "_refresh_all"), \
+                 patch.object(continue_cmd, "reset_conversation"), \
+                 patch.object(continue_cmd, "restore", return_value=("✅ 已恢复", True)), \
+                 patch.object(tui, "continue_extract", return_value=[]):
+                self.assertTrue(app._activate_history_session(sess))
+
+            entries = [
+                (source_log, 1_780_679_954.0, "已改为PowerShell单bat启动", 20),
+                (live_log, 1_780_679_954.0, "已改为PowerShell单bat启动", 20),
+            ]
+            with patch.object(tui, "continue_list", return_value=entries):
+                added = app._load_history_sidebar_sessions(report_errors=False, refresh=False)
+
+        self.assertEqual(added, 0)
+        self.assertEqual(len(app.sessions), 1)
+
+    def test_history_activation_preserves_sidebar_order_from_logical_history_time(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        with tempfile.TemporaryDirectory() as tmp:
+            source_log = os.path.join(tmp, "model_responses_111111.txt")
+            live_log = os.path.join(tmp, "model_responses_222222.txt")
+            with open(source_log, "wb") as fh:
+                fh.write(b"=== Prompt === 2026-06-06 01:19:14\nsame\n=== Response ===\nsame\n")
+            os.utime(source_log, (1_000.0, 1_000.0))
+
+            newer = tui.AgentSession(agent_id=1, name="newer", status="history", sidebar_sort_at=500.0)
+            target = tui.AgentSession(
+                agent_id=2,
+                name="target",
+                status="history",
+                lazy_history_path=source_log,
+                lazy_history_mtime=300.0,
+                lazy_history_preview="target",
+                lazy_history_rounds=2,
+                sidebar_sort_at=300.0,
+            )
+            older = tui.AgentSession(agent_id=3, name="older", status="history", sidebar_sort_at=100.0)
+            app.sessions = {1: newer, 2: target, 3: older}
+            app.current_id = 1
+            before = [sid for sid, _sess in tui.sidebar_ordered_sessions(app.sessions, app.current_id)]
+            fake_agent = SimpleNamespace(log_path=live_log)
+
+            def start_agent(sess):
+                sess.agent = fake_agent
+                return fake_agent
+
+            import continue_cmd
+
+            with patch.object(app, "_start_agent_for_session", side_effect=start_agent), \
+                 patch.object(app, "_remount_current_session"), \
+                 patch.object(app, "_refresh_all"), \
+                 patch.object(continue_cmd, "reset_conversation"), \
+                 patch.object(continue_cmd, "restore", return_value=("✅ 已恢复", True)), \
+                 patch.object(tui, "continue_extract", return_value=[]):
+                self.assertTrue(app._activate_history_session(target))
+
+            after = [sid for sid, _sess in tui.sidebar_ordered_sessions(app.sessions, app.current_id)]
+
+        self.assertEqual(before, [1, 2, 3])
+        self.assertEqual(after, before)
+        self.assertEqual(target.sidebar_sort_at, 300.0)
+
+    def test_tick_discovers_new_goal_child_history_while_launcher_is_active(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        app._ids = count(2)
+        parent_log = "D:/tmp/model_responses_parent.txt"
+        child_log = "D:/tmp/model_responses_child.txt"
+        launcher = tui.AgentSession(agent_id=1, name="goal launcher", status="idle")
+        launcher.agent = SimpleNamespace(
+            log_path=parent_log,
+            llmclient=SimpleNamespace(backend=SimpleNamespace(history=[])),
+        )
+        launcher.sidebar_kind = "goal_launcher"
+        app.sessions = {1: launcher}
+        app.current_id = 1
+        app._last_size = (80, 24)
+
+        def fake_meta(path):
+            base = os.path.basename(str(path).replace("\\", "/"))
+            if base == os.path.basename(parent_log):
+                return {"role": "goal_launcher"}
+            if base == os.path.basename(child_log):
+                return {"role": "goal_child", "parent_log": parent_log, "pid": 4242}
+            return {}
+
+        with patch.object(tui, "continue_list", return_value=[(child_log, 110.0, "持续推进", 7)]) as list_mock, \
+             patch.object(tui.session_meta, "get_meta", side_effect=fake_meta), \
+             patch.object(tui, "_pid_is_running", return_value=True), \
+             patch.object(app, "_refresh_topbar"), \
+             patch.object(app, "_refresh_sidebar"), \
+             patch.object(app, "_apply_responsive_layout"):
+            app._tick()
+            list_mock.assert_called_once()
+            self.assertIn(child_log, [sess.lazy_history_path for sess in app.sessions.values()])
+            rows = tui.sidebar_render_rows(app.sessions, current_id=1)
+
+        self.assertEqual([row.sid for row in rows], [1, 2])
+        self.assertEqual(rows[1].sess.sidebar_parent_log, parent_log)
 
 
 if __name__ == "__main__":

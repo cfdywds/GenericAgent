@@ -93,18 +93,29 @@ class GenericAgent:
                     mixin = MixinSession(llm_sessions, s['mixin_cfg'])
                     if isinstance(mixin._sessions[0], (NativeClaudeSession, NativeOAISession)): llm_sessions[i] = NativeToolClient(mixin)
                     else: llm_sessions[i] = ToolClient(mixin)
-                except Exception as e: print(f'\n\n\n[ERROR] Failed to init MixinSession with cfg {s["mixin_cfg"]}: {e}!!!\n\n')
+                except Exception as e:
+                    print(f'\n\n\n[ERROR] Failed to init MixinSession with cfg {s["mixin_cfg"]}: {e}!!!\n\n')
+                    llm_sessions[i] = None
+        llm_sessions = [s for s in llm_sessions if s is not None and not isinstance(s, dict)]
         self.llmclients = llm_sessions
-        self.llmclient = self.llmclients[self.llm_no%len(self.llmclients)]
+        if not self.llmclients:
+            self.llmclient = None
+            return
+        self.llm_no %= len(self.llmclients)
+        self.llmclient = self.llmclients[self.llm_no]
         if oldhistory: self.llmclient.backend.history = oldhistory
     
     def next_llm(self, n=-1):
         self.load_llm_sessions()
+        if not self.llmclients:
+            self.llmclient = None
+            raise Exception('[ERROR] no usable LLM backend found in mykey.py or mykey.json')
         self.llm_no = ((self.llm_no + 1) if n < 0 else n) % len(self.llmclients)
         lastc = self.llmclient
         self.llmclient = self.llmclients[self.llm_no]
-        try: self.llmclient.backend.history = lastc.backend.history
-        except: raise Exception('[ERROR] BAD Mixin config: Check your mykey.py')
+        last_history = getattr(getattr(lastc, 'backend', None), 'history', None)
+        if not hasattr(self.llmclient, 'backend'): raise Exception('[ERROR] BAD Mixin config: Check your mykey.py')
+        if last_history is not None: self.llmclient.backend.history = last_history
         self.llmclient.last_tools = ''
         name = self.get_llm_name(model=True)
         if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn')

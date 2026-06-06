@@ -7,6 +7,10 @@ _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 _LOG_GLOB = os.path.join(_LOG_DIR, 'model_responses_*.txt')
 _BLOCK_RE = re.compile(r'^=== (Prompt|Response) ===.*?\n(.*?)(?=^=== (?:Prompt|Response) ===|\Z)',
                        re.DOTALL | re.MULTILINE)
+_BLOCK_TS_RE = re.compile(
+    rb'^=== (?:Prompt|Response) ===\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})',
+    re.MULTILINE,
+)
 _SUMMARY_RE = re.compile(r'<summary>\s*(.*?)\s*</summary>', re.DOTALL)
 _ROUND_HEADER_RE = re.compile(rb'^=== (Prompt|Response) ===', re.MULTILINE)
 _ROUNDS_CACHE_PATH = os.path.join(os.path.expanduser('~'), '.genericagent', 'continue_rounds_cache.json')
@@ -124,6 +128,44 @@ _PREVIEW_WIN = 32 * 1024
 # user-typed prompt + first model reply + early summaries live in the first MB,
 # which is what users actually want to recall sessions by.
 _GREP_WIN = 1 * 1024 * 1024
+
+
+def _parse_block_timestamp(raw):
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode('ascii')
+        return float(time.mktime(time.strptime(raw, '%Y-%m-%d %H:%M:%S')))
+    except Exception:
+        return 0.0
+
+
+def _latest_block_timestamp_from_file(path, size=None):
+    """Newest timestamp written in `=== Prompt/Response === <ts>` headers."""
+    try:
+        size = os.path.getsize(path) if size is None else int(size)
+        with open(path, 'rb') as fh:
+            pos = size
+            carry = b''
+            while pos > 0:
+                n = min(64 * 1024, pos)
+                pos -= n
+                fh.seek(pos)
+                chunk = fh.read(n) + carry
+                matches = list(_BLOCK_TS_RE.finditer(chunk))
+                if matches:
+                    for match in reversed(matches):
+                        ts = _parse_block_timestamp(match.group(1))
+                        if ts:
+                            return ts
+                carry = chunk[:128]
+    except (OSError, ValueError):
+        return 0.0
+    return 0.0
+
+
+def _session_activity_time(path, st):
+    logical = _latest_block_timestamp_from_file(path, getattr(st, 'st_size', None))
+    return logical or float(getattr(st, 'st_mtime', 0.0) or 0.0)
 
 
 def file_contains_all(path, terms, max_bytes=_GREP_WIN):
@@ -294,7 +336,7 @@ def _rounds_for_file(path, st):
 
 
 def list_sessions(exclude_pid=None):
-    """Newest-first list of (path, mtime, preview_text, n_rounds). Preview uses head/tail window only."""
+    """Newest-first list of (path, activity_time, preview_text, n_rounds). Preview uses head/tail window only."""
     files = glob.glob(_LOG_GLOB)
     if exclude_pid is not None:
         tag = f'model_responses_{exclude_pid}.txt'
@@ -304,7 +346,7 @@ def list_sessions(exclude_pid=None):
     for f in files:
         try:
             st = os.stat(f)
-            mtime, sz = st.st_mtime, st.st_size
+            mtime, sz = _session_activity_time(f, st), st.st_size
         except OSError:
             continue
         if sz < 32:

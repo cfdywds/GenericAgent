@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import hashlib
 import json
 import math
 import os
@@ -1355,6 +1356,7 @@ class AgentSession:
     # Startup sidebar entries for past logs are lazy: they show metadata first,
     # then materialize into a real agent session only when selected.
     lazy_history_path: Optional[str] = None
+    history_source_paths: list[str] = field(default_factory=list)
     lazy_history_mtime: float = 0.0
     lazy_history_preview: str = ""
     lazy_history_rounds: int = 0
@@ -1564,10 +1566,7 @@ def _filter_choices(all_choices: list, query: str) -> list:
     `all_choices` is `[(label, value), ...]`. Each whitespace-separated token
     in `query` must hit somewhere in either:
       * the label text (cheap, always tried first), or
-      * the basename of `value` when it looks like a path, or
-      * the **content** of the session file at `value` (first ~1MB), so users
-        who remember a phrase from inside a session ("Conductor", "subB diff",
-        a file path they pasted) can find it back.
+      * the basename of `value` when it looks like a path.
 
     Empty/whitespace query short-circuits to the full list. Lives at module
     scope so the smoke test can exercise it without booting the TUI.
@@ -1578,17 +1577,6 @@ def _filter_choices(all_choices: list, query: str) -> list:
     terms = [t for t in q.split() if t]
     if not terms:
         return list(all_choices or [])
-
-    # Lazy import: continue_cmd already lives next to this module and provides
-    # the bounded-window file grep. We keep the import inside the function so
-    # other (non-/continue) pickers don't pay for it on app startup.
-    try:
-        from . import continue_cmd as _cc
-    except Exception:
-        try:
-            import continue_cmd as _cc  # type: ignore
-        except Exception:
-            _cc = None
 
     out = []
     for item in (all_choices or []):
@@ -1602,17 +1590,6 @@ def _filter_choices(all_choices: list, query: str) -> list:
         if all(t in meta for t in terms):
             out.append(item)
             continue
-        # Fall back to session-file content grep so phrases that only appear
-        # inside the conversation (not in the one-line preview label) still
-        # surface. Path-shaped string values only — non-path values skip.
-        if (
-            _cc is not None
-            and isinstance(value, str)
-            and value
-            and os.path.isfile(value)
-            and _cc.file_contains_all(value, terms)
-        ):
-            out.append(item)
     return out
 
 
@@ -2468,26 +2445,28 @@ def render_topbar(session_name: str, status: str, model: str, tasks_running: int
                   fold_mode: bool = True, busy_elapsed: int = 0,
                   effort: str = "", sess_elapsed: int = 0,
                   just_done: bool = False, term_width: int = 0) -> Table:
-    # Layout: identity-chip + session + status + fold packed LEFT; model + effort
-    # + tasks CENTERED; clock RIGHT. The 2:2:1 ratio keeps the centered model
-    # chip visually anchored even when the left column has the long status pill.
-    # The OS terminal tab title carries the session name separately — see
-    # GenericAgentTUI._update_terminal_title.
+    # One-row status strip. Keep labels short and separators narrow: this line
+    # sits above the main work area, so long captions make the terminal feel
+    # crowded before any useful content appears.
     t = Table.grid(expand=True)
-    # Equal column widths so the middle column's geometric center sits at the
-    # window center. Uneven ratios shift the centered band off-axis.
-    t.add_column(ratio=1, justify="left", no_wrap=True, overflow="ellipsis")
-    t.add_column(ratio=1, justify="center", no_wrap=True, overflow="ellipsis")
+    # Give session/status the most room. The model chip is useful, but it should
+    # not squeeze the active session name on wide terminals.
+    t.add_column(ratio=3, justify="left", no_wrap=True, overflow="ellipsis")
+    t.add_column(ratio=2, justify="center", no_wrap=True, overflow="ellipsis")
     t.add_column(ratio=1, justify="right", no_wrap=True)
 
-    short_name = session_name if len(session_name) <= 20 else session_name[:19] + "…"
+    name_budget = 18
+    if term_width:
+        name_budget = max(18, min(48, term_width // 3))
+    short_name = session_name if _cell_width(session_name) <= name_budget else _truncate(session_name, name_budget)
+    sep = " · "
 
     # LEFT: identity chip · session · status
     left = Text()
     left.append_text(render_status_chip(busy=tasks_running > 0, elapsed=busy_elapsed))
-    left.append("  ·  ", style=C_DIM)
-    left.append("session: ", style=C_MUTED); left.append(short_name, style=f"bold {C_CHIP_NAME}")
-    left.append("  ·  ", style=C_DIM)
+    left.append(sep, style=C_DIM)
+    left.append("sess ", style=C_MUTED); left.append(short_name, style=f"bold {C_CHIP_NAME}")
+    left.append(sep, style=C_DIM)
     if status == "running":
         dot_color = _heat_color(sess_elapsed)
         left.append("● ", style=dot_color)
@@ -2510,10 +2489,10 @@ def render_topbar(session_name: str, status: str, model: str, tasks_running: int
     mid = Text()
     mid.append("model: ", style=C_MUTED); mid.append(model or "?", style=C_CHIP_MODEL)
     if show_effort:
-        mid.append("  ·  ", style=C_DIM)
+        mid.append(sep, style=C_DIM)
         mid.append("effort: ", style=C_MUTED); mid.append(effort, style=f"bold {C_CHIP_EFFORT}")
     if show_tasks:
-        mid.append("  ·  ", style=C_DIM)
+        mid.append(sep, style=C_DIM)
         mid.append("tasks: ", style=C_MUTED); mid.append(str(tasks_running), style=C_CHIP_TASKS)
 
     # RIGHT: fold indicator + clock. Moved here from the LEFT column to keep the
@@ -2522,7 +2501,7 @@ def render_topbar(session_name: str, status: str, model: str, tasks_running: int
     right = Text()
     if fold_mode:
         right.append("▾ fold", style=C_DIM)
-        right.append("  ·  ", style=C_DIM)
+        right.append(sep, style=C_DIM)
     right.append(time.strftime("%H:%M:%S"), style=C_CHIP_TIME)
 
     t.add_row(left, mid, right)
@@ -2696,6 +2675,27 @@ def _sidebar_meta_for_path(path: str) -> dict:
         return {}
 
 
+def _pid_is_running(pid) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        import psutil  # type: ignore
+        return psutil.pid_exists(pid) and psutil.Process(pid).is_running()
+    except Exception:
+        pass
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
 def sidebar_continue_choice_label(
     path: str,
     mtime: float,
@@ -2844,6 +2844,7 @@ def refresh_sidebar_metadata(sess: AgentSession, name_lookup=None) -> AgentSessi
         persisted = sess.name
 
     log_mtime = _sidebar_log_mtime(sess)
+    meta_pid_running = _pid_is_running(meta.get("pid")) if isinstance(meta, dict) else False
     cheap_sig = (
         _SIDEBAR_META_VERSION,
         path,
@@ -2854,6 +2855,7 @@ def refresh_sidebar_metadata(sess: AgentSession, name_lookup=None) -> AgentSessi
         sess.lazy_history_rounds,
         persisted,
         tuple(sorted(meta.items())) if isinstance(meta, dict) else (),
+        meta_pid_running,
         _sidebar_history_len(sess),
         log_mtime,
     )
@@ -2874,6 +2876,9 @@ def refresh_sidebar_metadata(sess: AgentSession, name_lookup=None) -> AgentSessi
     if parent_log and not title.startswith("└─ "):
         title = f"└─ {title}"
     summary = _sidebar_status_text(sess)
+    if sess.lazy_history_path and sess.agent is None and meta_pid_running:
+        rounds = f"{sess.lazy_history_rounds}轮" if sess.lazy_history_rounds else "历史"
+        summary = f"running · {rounds}"
     if not (sess.lazy_history_path and sess.agent is None):
         summary = _sidebar_clean_text(_sidebar_last_summary(sess)) or summary
         if kind != "main" and sidebar_kind_label(kind) not in summary:
@@ -2894,6 +2899,152 @@ def sidebar_ordered_sessions(sessions: dict[int, AgentSession], current_id: Opti
         running_rank = 0 if sess.status == "running" else 1
         return (running_rank, -_sidebar_sort_at(sess), -sid)
     return sorted(sessions.items(), key=key)
+
+
+def _session_is_effectively_running(sess: AgentSession) -> bool:
+    if sess.status == "running":
+        return True
+    summary = _sidebar_clean_text(sess.sidebar_summary).lower()
+    if summary.startswith("running") or " running" in summary:
+        return True
+    return False
+
+
+def _sidebar_parent_path(sess: AgentSession) -> str:
+    return _sidebar_clean_text(getattr(sess, "sidebar_parent_log", ""))
+
+
+def _sidebar_path_key(path: str) -> str:
+    path = _sidebar_clean_text(path)
+    if not path:
+        return ""
+    return os.path.normcase(os.path.abspath(path.replace("\\", os.sep).replace("/", os.sep)))
+
+
+def _history_entry_collision_key(entry) -> tuple:
+    try:
+        path, mtime, preview, rounds = entry[:4]
+    except Exception:
+        return ("bad-entry", repr(entry))
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = -1
+    return (
+        size,
+        float(mtime or 0.0),
+        _sidebar_clean_text(preview),
+        int(rounds or 0),
+    )
+
+
+def _history_file_digest(path: str) -> str:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def dedupe_history_session_entries(entries) -> list:
+    entries = list(entries or [])
+    collision_counts: dict[tuple, int] = {}
+    for entry in entries:
+        key = _history_entry_collision_key(entry)
+        collision_counts[key] = collision_counts.get(key, 0) + 1
+
+    out = []
+    seen_paths: set[str] = set()
+    seen_content: set[tuple] = set()
+    for entry in entries:
+        try:
+            path = entry[0]
+        except Exception:
+            continue
+        path_key = _sidebar_path_key(path)
+        if path_key and path_key in seen_paths:
+            continue
+        if path_key:
+            seen_paths.add(path_key)
+
+        collision_key = _history_entry_collision_key(entry)
+        if collision_counts.get(collision_key, 0) > 1:
+            digest = _history_file_digest(path)
+            if digest:
+                content_key = (collision_key, digest)
+                if content_key in seen_content:
+                    continue
+                seen_content.add(content_key)
+        out.append(entry)
+    return out
+
+
+def _sidebar_children_by_parent(
+    sessions: dict[int, AgentSession],
+) -> dict[str, list[tuple[int, AgentSession]]]:
+    children: dict[str, list[tuple[int, AgentSession]]] = {}
+    for sid, sess in sessions.items():
+        parent = _sidebar_parent_path(sess)
+        if not parent:
+            continue
+        children.setdefault(_sidebar_path_key(parent), []).append((sid, sess))
+    for rows in children.values():
+        rows.sort(key=lambda item: (-_sidebar_sort_at(item[1]), -item[0]))
+    return children
+
+
+def _sidebar_session_path_key(sess: AgentSession) -> str:
+    path = _sidebar_session_path(sess)
+    return _sidebar_path_key(path)
+
+
+def sidebar_ordered_session_groups(
+    sessions: dict[int, AgentSession],
+    current_id: Optional[int],
+) -> list[tuple[int, AgentSession]]:
+    children = _sidebar_children_by_parent(sessions)
+    child_ids = {sid for rows in children.values() for sid, _ in rows}
+    ordered: list[tuple[int, AgentSession]] = []
+    seen: set[int] = set()
+    for sid, sess in sidebar_ordered_sessions(sessions, current_id):
+        if sid in seen or sid in child_ids:
+            continue
+        ordered.append((sid, sess))
+        seen.add(sid)
+        for child_sid, child_sess in children.get(_sidebar_session_path_key(sess), []):
+            if child_sid not in seen:
+                ordered.append((child_sid, child_sess))
+                seen.add(child_sid)
+    for sid, sess in sidebar_ordered_sessions(sessions, current_id):
+        if sid not in seen:
+            ordered.append((sid, sess))
+            seen.add(sid)
+    return ordered
+
+
+def _sidebar_launcher_summary(
+    sid: int,
+    sess: AgentSession,
+    children_by_parent: dict[str, list[tuple[int, AgentSession]]],
+) -> str:
+    children = children_by_parent.get(_sidebar_session_path_key(sess), [])
+    if not children:
+        return sess.sidebar_summary or _sidebar_status_text(sess)
+    running = sum(1 for _child_sid, child in children if _session_is_effectively_running(child))
+    total = len(children)
+    kind = getattr(sess, "sidebar_kind", "main")
+    if kind.startswith("goal"):
+        prefix = "goal"
+    elif kind.startswith("hive"):
+        prefix = "hive"
+    else:
+        prefix = "child"
+    if running:
+        return f"{prefix} running {running}/{total}"
+    return f"{prefix} children {total}"
 
 
 def _sidebar_render_preview(sess: AgentSession) -> str:
@@ -2951,28 +3102,35 @@ class SidebarRow:
 
 
 def _sidebar_title_text_width(content_width: int, display_no: int) -> int:
-    prefix_w = _cell_width(f"#{display_no} ")
-    return max(6, int(content_width or 30) - 2 - 4 - prefix_w)
+    return max(6, int(content_width or 30) - 2 - 4)
 
 
 def sidebar_render_rows(
     sessions: dict[int, AgentSession],
     current_id: Optional[int],
     content_width: int = 30,
+    *,
+    refresh: bool = True,
 ) -> list[SidebarRow]:
     rows: list[SidebarRow] = []
-    for display_no, (sid, sess) in enumerate(sidebar_ordered_sessions(sessions, current_id), start=1):
-        if not sess.sidebar_title:
+    if refresh:
+        for sess in sessions.values():
+            refresh_sidebar_metadata(sess)
+    children_by_parent = _sidebar_children_by_parent(sessions)
+    for display_no, (sid, sess) in enumerate(sidebar_ordered_session_groups(sessions, current_id), start=1):
+        if refresh and not sess.sidebar_title:
             refresh_sidebar_metadata(sess)
         title = sess.sidebar_title or sess.name
+        running = _session_is_effectively_running(sess)
+        summary = _sidebar_launcher_summary(sid, sess, children_by_parent)
         rows.append(SidebarRow(
             sid=sid,
             sess=sess,
             display_no=display_no,
             active=sid == current_id,
-            running=sess.status == "running",
+            running=running,
             title=title,
-            summary=sess.sidebar_summary or _sidebar_status_text(sess),
+            summary=summary,
             created_time=_sidebar_created_time(sess),
             rounds=_sidebar_rounds_label(sess),
             age=_short_age(sess.sidebar_activity_at) if sess.sidebar_activity_at else "",
@@ -2987,10 +3145,12 @@ def sidebar_sid_at_visual_row(
     current_id: Optional[int],
     visual_row: int,
     content_width: int = 30,
+    *,
+    refresh: bool = False,
 ) -> Optional[int]:
     if visual_row < 0:
         return None
-    for row in sidebar_render_rows(sessions, current_id, content_width):
+    for row in sidebar_render_rows(sessions, current_id, content_width, refresh=refresh):
         if visual_row < row.row_count:
             return row.sid
         visual_row -= row.row_count
@@ -3008,22 +3168,24 @@ def _sidebar_separator_text(content_width: int) -> Text:
 
 def sidebar_render_row_text(row: SidebarRow) -> tuple[Text, Text]:
     title_style = f"bold {C_CHIP_NAME}" if row.active else C_MUTED
-    prefix = f"#{row.display_no} "
     title_lines = row.title_lines or [row.title]
     title = Text()
-    title.append(prefix, style=C_CHIP_TASKS)
     title.append(title_lines[0], style=title_style)
     for line in title_lines[1:]:
-        title.append("\n" + (" " * _cell_width(prefix)))
+        title.append("\n")
         title.append(line, style=title_style)
 
     meta = Text()
     meta.append(row.created_time, style=C_CHIP_TIME)
-    if row.rounds:
+    summary = _sidebar_clean_text(row.summary)
+    if summary:
+        meta.append(" · ", style=C_DIM)
+        meta.append(summary, style=C_GREEN if row.active or row.running else C_MUTED)
+    elif row.rounds:
         meta.append(" · ", style=C_DIM)
         meta.append(row.rounds, style=C_GREEN if row.active or row.running else C_MUTED)
     label = sidebar_kind_label(getattr(row.sess, "sidebar_kind", "main"))
-    if label:
+    if label and label not in summary:
         meta.append(" · ", style=C_DIM)
         meta.append(label, style=C_DIM)
     return title, meta
@@ -3033,6 +3195,8 @@ def render_sidebar(
     sessions: dict[int, AgentSession],
     current_id: Optional[int],
     content_width: int = 30,
+    *,
+    refresh: bool = True,
 ) -> Table:
     outer = Table.grid(expand=True)
     outer.add_column()
@@ -3043,7 +3207,7 @@ def render_sidebar(
     sess_tbl.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
     sess_tbl.add_column(width=4, justify="right", no_wrap=True, overflow="ellipsis")
     blank = Text("")
-    for row in sidebar_render_rows(sessions, current_id, content_width):
+    for row in sidebar_render_rows(sessions, current_id, content_width, refresh=refresh):
         style = SEL if row.active else None
         title_text, meta_text = sidebar_render_row_text(row)
         sess_tbl.add_row(blank, _sidebar_separator_text(content_width), blank, style=style)
@@ -3204,6 +3368,8 @@ class GenericAgentTUI(App[None]):
         self._title_frame: int = 0
         self._title_timer = None
         self._last_title: str = ""
+        self._history_sidebar_sync_interval: float = 2.0
+        self._next_history_sidebar_sync_at: float = 0.0
         # Register our github-dark palette as a first-class Textual theme; the other
         # cycle entries are Textual built-ins (nord, gruvbox, dracula, tokyo-night,
         # textual-light), whose ga-* CSS slots are derived in get_css_variables.
@@ -3337,10 +3503,23 @@ class GenericAgentTUI(App[None]):
     def _tick(self) -> None:
         # 0.5s poll: refresh clock + detect resizes Windows misses (snap, fullscreen).
         self._refresh_topbar()
+        if self._sidebar_needs_liveness_poll():
+            self._sync_history_sidebar_sessions()
+            self._refresh_sidebar()
         size = (self.size.width, self.size.height)
         if size != self._last_size:
             self._last_size = size
             self._apply_responsive_layout()
+
+    def _sidebar_needs_liveness_poll(self) -> bool:
+        for sess in self.sessions.values():
+            if getattr(sess, "sidebar_parent_log", ""):
+                return True
+            if str(getattr(sess, "sidebar_kind", "")).endswith("_launcher"):
+                return True
+            if _session_is_effectively_running(sess):
+                return True
+        return False
 
     def _patch_auto_scroll_for_selection(self) -> None:
         # Make selection-drag into #input still scroll #messages: include _select_start as a
@@ -3467,27 +3646,35 @@ class GenericAgentTUI(App[None]):
         stem = stem.replace("model_responses_", "history-")
         return stem or "history"
 
-    def _load_history_sidebar_sessions(self) -> None:
+    def _load_history_sidebar_sessions(
+        self,
+        *,
+        report_errors: bool = True,
+        refresh: bool = True,
+    ) -> int:
         try:
-            sessions = continue_list(exclude_pid=os.getpid())
+            sessions = dedupe_history_session_entries(continue_list(exclude_pid=os.getpid()))
         except Exception as e:
-            self._system(f"⚠️ 自动装载历史会话失败: {type(e).__name__}: {e}")
-            return
+            if report_errors:
+                self._system(f"⚠️ 自动装载历史会话失败: {type(e).__name__}: {e}")
+            return 0
         existing = set()
         for sess in self.sessions.values():
-            path = sess.lazy_history_path
+            paths = [sess.lazy_history_path, *getattr(sess, "history_source_paths", [])]
             if sess.agent is not None:
-                path = getattr(sess.agent, "log_path", "") or path
-            if path:
-                existing.add(os.path.abspath(path))
+                paths.append(getattr(sess.agent, "log_path", ""))
+            for path in paths:
+                key = _sidebar_path_key(path)
+                if key:
+                    existing.add(key)
         try:
             import session_names as _sn
         except Exception:
             _sn = None
         added = 0
         for path, mtime, first, n in sessions:
-            ap = os.path.abspath(path)
-            if ap in existing:
+            path_key = _sidebar_path_key(path)
+            if path_key in existing:
                 continue
             nm = ""
             if _sn is not None:
@@ -3510,10 +3697,41 @@ class GenericAgentTUI(App[None]):
                 name_lookup=(lambda p, _sn=_sn: _sn.name_for(p) if _sn is not None else ""),
             )
             self.sessions[sid] = hist
-            existing.add(ap)
+            if path_key:
+                existing.add(path_key)
             added += 1
-        if added:
+        if added and refresh:
             self._refresh_sidebar()
+        return added
+
+    def _sync_history_sidebar_sessions(self, *, force: bool = False) -> int:
+        now = time.time()
+        if not force and now < self._next_history_sidebar_sync_at:
+            return 0
+        self._next_history_sidebar_sync_at = now + self._history_sidebar_sync_interval
+        return self._load_history_sidebar_sessions(report_errors=False, refresh=False)
+
+    def _current_history_choices(self) -> list[tuple[str, str]]:
+        """Build `/continue` choices from already-loaded sidebar history.
+
+        Startup already loads lazy history sessions for the sidebar. Reusing
+        that metadata avoids a second full log scan when the user opens the
+        history picker.
+        """
+        choices: list[tuple[str, str]] = []
+        for _sid, hist in sidebar_ordered_sessions(self.sessions, self.current_id):
+            path = hist.lazy_history_path
+            if not path or hist.agent is not None:
+                continue
+            label = sidebar_continue_choice_label(
+                path,
+                hist.lazy_history_mtime,
+                hist.lazy_history_preview,
+                hist.lazy_history_rounds,
+                persisted_name=hist.name if hist.name and not hist.name.startswith("history-") else "",
+            )
+            choices.append((label, path))
+        return choices
 
     def _restore_session_from_path(
         self,
@@ -3522,12 +3740,17 @@ class GenericAgentTUI(App[None]):
         *,
         defer_finish: bool = True,
     ) -> str:
+        restoring_lazy_history = bool(sess.lazy_history_path and sess.agent is None)
         try:
             path_mtime = float(os.path.getmtime(path))
         except OSError:
             path_mtime = 0.0
-        restored_sort_at = float(path_mtime or sess.lazy_history_mtime or sess.sidebar_sort_at or 0.0)
-        restored_activity_at = float(path_mtime or sess.lazy_history_mtime or sess.sidebar_activity_at or restored_sort_at or 0.0)
+        if restoring_lazy_history:
+            restored_sort_at = float(sess.sidebar_sort_at or sess.lazy_history_mtime or path_mtime or 0.0)
+            restored_activity_at = float(sess.sidebar_activity_at or sess.lazy_history_mtime or restored_sort_at or path_mtime or 0.0)
+        else:
+            restored_sort_at = float(path_mtime or sess.sidebar_sort_at or sess.lazy_history_mtime or 0.0)
+            restored_activity_at = float(path_mtime or sess.sidebar_activity_at or sess.lazy_history_mtime or restored_sort_at or 0.0)
         restored_title = _sidebar_clean_text(sess.sidebar_title or sess.name)
         if sess.agent is None:
             self._start_agent_for_session(sess)
@@ -3586,6 +3809,9 @@ class GenericAgentTUI(App[None]):
                     session_meta.migrate(path, current_log)
                 except Exception:
                     pass
+            source_key = _sidebar_path_key(path)
+            if source_key and all(_sidebar_path_key(p) != source_key for p in sess.history_source_paths):
+                sess.history_source_paths.append(path)
             sess.status = "idle"
             sess.lazy_history_path = None
             sess.lazy_history_mtime = 0.0
@@ -4736,11 +4962,16 @@ class GenericAgentTUI(App[None]):
         if m:
             token = m.group(1)
             if token.isdigit():
-                sessions = continue_list(exclude_pid=os.getpid())
+                choices = self._current_history_choices()
+                sessions = []
+                if not choices:
+                    sessions = dedupe_history_session_entries(continue_list(exclude_pid=os.getpid()))
+                    choices = [(sidebar_continue_choice_label(path, mtime, first, n), path)
+                               for path, mtime, first, n in sessions]
                 idx = int(token) - 1
-                if not (0 <= idx < len(sessions)):
-                    self._system(f"❌ 索引越界（有效范围 1-{len(sessions)}）"); return
-                self._do_continue_restore(sessions[idx][0])
+                if not (0 <= idx < len(choices)):
+                    self._system(f"❌ 索引越界（有效范围 1-{len(choices)}）"); return
+                self._do_continue_restore(choices[idx][1])
                 return
             log_path = getattr(sess.agent, "log_path", "") or ""
             own_key = os.path.basename(log_path)
@@ -4755,21 +4986,22 @@ class GenericAgentTUI(App[None]):
                 self._system(f"❌ 找不到名为 {token!r} 的会话"); return
             self._do_continue_restore(path)
             return
-        sessions = continue_list(exclude_pid=os.getpid())
-        if not sessions:
-            self._system("❌ 没有可恢复的历史会话"); return
-        choices = []
-        try:
-            import session_names as _sn
-        except Exception:
-            _sn = None
-        for path, mtime, first, n in sessions:
+        choices = self._current_history_choices()
+        if not choices:
+            sessions = dedupe_history_session_entries(continue_list(exclude_pid=os.getpid()))
+            if not sessions:
+                self._system("❌ 没有可恢复的历史会话"); return
             try:
-                nm = _sn.name_for(path) if _sn else ""
+                import session_names as _sn
             except Exception:
-                nm = ""
-            choices.append((sidebar_continue_choice_label(path, mtime, first, n, persisted_name=nm), path))
-        head = f"选择要恢复的会话 ({len(sessions)} 条 · 输入关键字过滤 · ↑/↓ 移动，→/Enter 确认，Esc 取消)"
+                _sn = None
+            for path, mtime, first, n in sessions:
+                try:
+                    nm = _sn.name_for(path) if _sn else ""
+                except Exception:
+                    nm = ""
+                choices.append((sidebar_continue_choice_label(path, mtime, first, n, persisted_name=nm), path))
+        head = f"选择要恢复的会话 ({len(choices)} 条 · 输入关键字过滤 · ↑/↓ 移动，→/Enter 确认，Esc 取消)"
         msg = ChatMessage(
             role="system", content=head, kind="choice", choices=choices,
             on_select=lambda v: self._do_continue_restore(v),
@@ -5943,7 +6175,9 @@ class GenericAgentTUI(App[None]):
         except Exception: model = "?"
         try: effort = getattr(s.agent.llmclient.backend, "reasoning_effort", "") or ""
         except Exception: effort = ""
-        tasks_running = sum(1 for x in self.sessions.values() if x.status == "running")
+        for sess in self.sessions.values():
+            refresh_sidebar_metadata(sess)
+        tasks_running = sum(1 for x in self.sessions.values() if _session_is_effectively_running(x))
         # App-wide busy window for the ✦ identity chip.
         if tasks_running > 0:
             if self._busy_since is None: self._busy_since = time.time()
@@ -5953,7 +6187,9 @@ class GenericAgentTUI(App[None]):
             elapsed = 0
         # Per-session busy window — drives the heat-color dot + done-flash.
         now = time.time()
-        if s.status == "running":
+        current_running = _session_is_effectively_running(s)
+        display_status = "running" if current_running and s.status != "running" else s.status
+        if current_running:
             if s._busy_since is None: s._busy_since = now
             sess_elapsed = int(now - s._busy_since)
             just_done = False
@@ -5976,7 +6212,7 @@ class GenericAgentTUI(App[None]):
         try: term_w = self.size.width
         except Exception: term_w = 0
         self.query_one("#topbar", Static).update(
-            render_topbar(s.name, s.status, model, tasks_running,
+            render_topbar(s.name, display_status, model, tasks_running,
                           fold_mode=self.fold_mode, busy_elapsed=elapsed, effort=effort,
                           sess_elapsed=sess_elapsed, just_done=just_done,
                           term_width=term_w))
@@ -6016,7 +6252,7 @@ class GenericAgentTUI(App[None]):
         # the terminal. (textual/app.py: `with redirect_stdout(self._capture_stdout)`)
         if not self.is_mounted or self.current_id is None: return
         sess = self.current
-        busy = any(x.status == "running" for x in self.sessions.values())
+        busy = any(_session_is_effectively_running(x) for x in self.sessions.values())
         name = (sess.name or "session").strip() or "session"
         if busy:
             glyph = _TITLE_SPINNER_FRAMES[self._title_frame % len(_TITLE_SPINNER_FRAMES)]
@@ -6029,7 +6265,7 @@ class GenericAgentTUI(App[None]):
         self._term_write(f"\x1b]0;{title}\x07")
 
     def _ensure_title_timer(self) -> None:
-        busy = any(x.status == "running" for x in self.sessions.values())
+        busy = any(_session_is_effectively_running(x) for x in self.sessions.values())
         if busy and self._title_timer is None:
             try: self._title_timer = self.set_interval(0.2, self._tick_title)
             except Exception: pass
@@ -6041,7 +6277,7 @@ class GenericAgentTUI(App[None]):
     def _tick_title(self) -> None:
         self._title_frame = (self._title_frame + 1) % len(_TITLE_SPINNER_FRAMES)
         self._update_terminal_title()
-        if not any(x.status == "running" for x in self.sessions.values()):
+        if not any(_session_is_effectively_running(x) for x in self.sessions.values()):
             self._ensure_title_timer()
 
     def _refresh_bottombar(self):
@@ -6078,7 +6314,7 @@ class GenericAgentTUI(App[None]):
         for sess in self.sessions.values():
             refresh_sidebar_metadata(sess, name_lookup=lookup)
         self.query_one("#sidebar-content", Static).update(
-            render_sidebar(self.sessions, self.current_id, self._sidebar_content_width())
+            render_sidebar(self.sessions, self.current_id, self._sidebar_content_width(), refresh=False)
         )
         self._scroll_active_session_into_view()
 
@@ -6093,11 +6329,18 @@ class GenericAgentTUI(App[None]):
             return
         content_width = self._sidebar_content_width()
         y = 2  # pad-top(1) + "SESSIONS"(1), matches on_click
-        for row in sidebar_render_rows(self.sessions, self.current_id, content_width):
+        for row in sidebar_render_rows(self.sessions, self.current_id, content_width, refresh=False):
             rows = row.row_count
             if row.sid == self.current_id:
-                self.call_after_refresh(scroll.scroll_to_region,
-                                        Region(0, y, 1, rows), animate=False)
+                viewport_top = int(getattr(scroll, "scroll_y", 0) or 0)
+                try:
+                    viewport_height = int(scroll.content_region.height or scroll.size.height or 0)
+                except Exception:
+                    viewport_height = 0
+                viewport_bottom = viewport_top + viewport_height
+                if viewport_height <= 0 or y < viewport_top or y + rows > viewport_bottom:
+                    self.call_after_refresh(scroll.scroll_to_region,
+                                            Region(0, y, 1, rows), animate=False)
                 return
             y += rows
 
