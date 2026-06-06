@@ -906,11 +906,31 @@ def _ensure_text_block(blocks):
     blocks.insert(1, {"type": "text", "text": txt})
     return txt
 
+def _redact_sensitive_text(content):
+    text = str(content)
+    patterns = [
+        (r'(?i)(["\']authorization["\']\s*:\s*["\']bearer\s+)[^"\']+(["\'])', r'\1[REDACTED]\2'),
+        (r'(?i)(authorization\s*[:=]\s*bearer\s+)[^\s\"\']+', r'\1[REDACTED]'),
+        (r'(?i)(["\'](?:api[_-]?key|apikey|secret|token|password)["\']\s*:\s*["\'])[^"\']+(["\'])', r'\1[REDACTED]\2'),
+        (r'(?i)((?:api[_-]?key|apikey|secret|token|password)\s*[=:]\s*)([\"\']?)[^\s,;\}\]\"\']+(\2)', r'\1\2[REDACTED]\3'),
+        (r'(?i)(["\']cookie["\']\s*:\s*["\'])[^"\']+(["\'])', r'\1[REDACTED]\2'),
+        (r'(?i)(cookie\s*[:=]\s*)[^\n\r]+', r'\1[REDACTED]'),
+        (r'\beyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\b', '[REDACTED]'),
+        (r'\bgh[opsu]_[A-Za-z0-9_]{20,}\b', '[REDACTED]'),
+        (r'\bAKIA[0-9A-Z]{16}\b', '[REDACTED]'),
+        (r'\b(sk-(?:ant-|or-)?[A-Za-z0-9][A-Za-z0-9._\-]{8,})\b', '[REDACTED]'),
+        (r'\b(cr_[A-Za-z0-9][A-Za-z0-9._\-]{8,})\b', '[REDACTED]'),
+    ]
+    for pattern, repl in patterns:
+        text = re.sub(pattern, repl, text)
+    return text
+
 def _write_llm_log(label, content, log_path=None):
     if not log_path:
         log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'temp/model_responses/model_responses_{os.getpid()}.txt')
     os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    content = _redact_sensitive_text(content)
     with open(log_path, 'a', encoding='utf-8', errors='replace') as f:
         f.write(f"=== {label} === {ts}\n{content}\n\n")
 

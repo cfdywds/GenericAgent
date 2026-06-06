@@ -144,6 +144,24 @@ def format_history_block(session_name, history_lines):
 import tempfile, shutil, zipfile, glob
 from collections import defaultdict
 
+def _repo_root():
+    return os.path.dirname(os.path.dirname(L4_DIR))
+
+def _delete_raw_files(paths, repo_root=None):
+    root = os.path.abspath(repo_root or _repo_root())
+    import sys
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from security.file_policy import FilePolicy
+
+    policy = FilePolicy(root=root, cwd=os.path.join(root, "temp"))
+    deleted = 0
+    for rp in paths:
+        result = policy.safe_delete(rp, actor="l4_archive", reason="archived raw model response")
+        if result.get("status") in {"deleted", "quarantined"}:
+            deleted += 1
+    return deleted
+
 def _existing_sessions(l4_dir):
     """Read session names already in all_histories.txt."""
     hist_path = os.path.join(l4_dir, 'all_histories.txt')
@@ -223,10 +241,7 @@ def batch_process(src, l4_dir=None, dry_run=True):
         if 'recent' in reason: continue  # active session still being written
         m = [f for f in raw_files if os.path.basename(f) == fname]
         if m: to_del.append(m[0])
-    deleted = 0
-    for rp in to_del:
-        try: os.remove(rp); deleted += 1
-        except Exception: pass
+    deleted = _delete_raw_files(to_del)
     print(f"Deleted {deleted}/{len(to_del)} raw files")
 
     shutil.rmtree(tmp_dir, ignore_errors=True)

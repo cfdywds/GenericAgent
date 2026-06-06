@@ -36,6 +36,12 @@
       "mode": {"type": "string", "enum": ["overwrite", "append", "prepend"], "description": "Write mode", "default": "overwrite"}}}
   }},
   {"type": "function", "function": {
+    "name": "restore_quarantine",
+    "description": "Restore a file moved to temp/quarantine by the safety policy. Use the quarantine_id returned by a quarantined delete.",
+    "parameters": {"type": "object", "properties": {
+      "quarantine_id": {"type": "string", "description": "Quarantine id returned by safe delete"}}, "required": ["quarantine_id"], "additionalProperties": false}
+  }},
+  {"type": "function", "function": {
     "name": "web_scan",
     "description": "Get simplified HTML and tab list. Removes hidden/floating/covered elements. Call after switching pages",
     "parameters": {"type": "object", "properties": {
@@ -70,5 +76,13 @@
     "name": "start_long_term_update",
     "description": "Start distilling long-term memory. Call when discovering info worth remembering (env facts/user prefs/lessons learned). Skip if memory already updated or in autonomous flow. Must call when a task that took 15+ turns is completed",
     "parameters": {"type": "object", "properties": {}}}
+  },
+  {"type": "function", "function": {
+    "name": "web_search",
+    "description": "Search the web. Primary: Grok live search (fast, returns structured results with sources). Fallback: browser→Google (original channel). Use for factual queries, current events, real-time info.",
+    "parameters": {"type": "object", "properties": {
+      "query": {"type": "string", "description": "Search query in natural language"},
+      "max_results": {"type": "integer", "description": "Max number of source results to return", "default": 5}
+    }, "required": ["query"]}}
   }
 ]

@@ -36,6 +36,12 @@
       "mode": {"type": "string", "enum": ["overwrite", "append", "prepend"], "description": "写入模式覆盖、追加或在开头追加", "default": "overwrite"}}}
   }},
   {"type": "function", "function": {
+    "name": "restore_quarantine",
+    "description": "恢复被安全策略移动到 temp/quarantine 的文件。使用隔离删除结果返回的 quarantine_id。",
+    "parameters": {"type": "object", "properties": {
+      "quarantine_id": {"type": "string", "description": "safe delete 返回的隔离区 ID"}}, "required": ["quarantine_id"], "additionalProperties": false}
+  }},
+  {"type": "function", "function": {
     "name": "web_scan",
     "description": "获取当前页面的简化HTML内容和标签页列表。会移除隐藏/浮动/被遮盖的元素。切换页面后一般应先调用查看",
     "parameters": {"type": "object", "properties": {
@@ -70,5 +76,13 @@
     "name": "start_long_term_update",
     "description": "准备开始提炼记忆。发现值得长期记忆的信息（环境事实/用户偏好/避坑经验）时调用此工具。已记忆更新或在自主流程内时无需调用。超15轮完成的任务必须调用以沉淀经验",
     "parameters": {"type": "object", "properties": {}}}
+  },
+  {"type": "function", "function": {
+    "name": "web_search",
+    "description": "搜索互联网。优先使用 Grok live search / grok2api（快速，返回带来源的结构化结果），失败时降级到浏览器 Google。适合事实查询、实时信息和当前事件。",
+    "parameters": {"type": "object", "properties": {
+      "query": {"type": "string", "description": "自然语言搜索查询"},
+      "max_results": {"type": "integer", "description": "最多返回的来源结果数量", "default": 5}
+    }, "required": ["query"]}}
   }
 ]

@@ -26,7 +26,7 @@ WS API:
 """
 from __future__ import annotations
 
-import asyncio, contextlib, importlib, json, os, sys
+import asyncio, contextlib, importlib, json, os, secrets, sys
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,6 +85,7 @@ class AgentManager:
         self.config: Dict[str, Any] = {}
         self.sessions: Dict[str, Session] = {}
         self.active_session_id: Optional[str] = None
+        self.bridge_token = os.environ.get("BRIDGE_TOKEN") or secrets.token_urlsafe(32)
 
     @property
     def mykey_path(self) -> str:
@@ -448,18 +449,50 @@ async def ws_handler(request):
 # Transport layer: HTTP command/data API
 # ---------------------------------------------------------------------------
 
+def _default_allowed_origin() -> str:
+    host = _bridge_bind_host()
+    port = os.environ.get("BRIDGE_PORT", "14168")
+    return os.environ.get("BRIDGE_ALLOWED_ORIGIN", f"http://{host}:{port}")
+
+
+def _bridge_bind_host() -> str:
+    host = os.environ.get("BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    if host in {"0.0.0.0", "::", "[::]"}:
+        return "127.0.0.1"
+    return host
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return True
+    return origin == _default_allowed_origin()
+
+
 def cors_headers():
     return {
-        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Origin": _default_allowed_origin(),
         "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "Content-Type, X-GA-Bridge-Token",
+        "Vary": "Origin",
     }
+
+
+def _requires_bridge_token(method: str) -> bool:
+    return (method or "").upper() in {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _bridge_token_allowed(request) -> bool:
+    return request.headers.get("X-GA-Bridge-Token") == manager.bridge_token
 
 
 @web.middleware
 async def cors_middleware(request, handler):
+    if not _origin_allowed(request.headers.get("Origin")):
+        return web.Response(status=403, text="Origin not allowed", headers=cors_headers())
     if request.method == "OPTIONS":
         return web.Response(status=204, headers=cors_headers())
+    if _requires_bridge_token(request.method) and not _bridge_token_allowed(request):
+        return web.Response(status=403, text="Bridge token required", headers=cors_headers())
     resp = await handler(request)
     for k, v in cors_headers().items():
         resp.headers[k] = v
@@ -518,7 +551,19 @@ async def list_sessions_handler(request):
 
 async def new_session_handler(request):
     data = await read_json(request)
-    sess = manager.create_session(cwd=data.get("cwd") or data.get("path"))
+    cwd = data.get("cwd") or data.get("path") or manager.ga_root
+    root = Path(manager.ga_root).resolve()
+    cwd_path = Path(cwd).expanduser()
+    if not cwd_path.is_absolute():
+        cwd_path = root / cwd_path
+    cwd_path = cwd_path.resolve()
+    try:
+        cwd_path.relative_to(root)
+    except ValueError:
+        return json_ok({"ok": False, "error": f"cwd outside allowed workspace: {cwd_path}"}, status=403)
+    if not cwd_path.exists() or not cwd_path.is_dir():
+        return json_ok({"ok": False, "error": f"cwd does not exist or is not a directory: {cwd_path}"}, status=400)
+    sess = manager.create_session(cwd=str(cwd_path))
     return json_ok({"ok": True, "sessionId": sess.id, "session": manager.snapshot(sess)}, status=201)
 
 
@@ -543,8 +588,16 @@ async def prompt_handler(request):
 
 async def messages_handler(request):
     sid = request.match_info["sid"]
-    after = int(request.query.get("after") or request.query.get("afterId") or 0)
-    limit = int(request.query.get("limit") or 200)
+    try:
+        after = int(request.query.get("after") or request.query.get("afterId") or 0)
+        limit = int(request.query.get("limit") or 200)
+    except (TypeError, ValueError):
+        return json_ok({"ok": False, "error": "after and limit must be integers"}, status=400)
+    if after < 0:
+        return json_ok({"ok": False, "error": "after must be >= 0"}, status=400)
+    if limit < 1:
+        return json_ok({"ok": False, "error": "limit must be >= 1"}, status=400)
+    limit = min(limit, 1000)
     return json_ok(manager.messages(sid, after=after, limit=limit))
 
 
@@ -556,11 +609,18 @@ async def cancel_handler(request):
 async def path_open_handler(request):
     data = await read_json(request)
     kind = data.get("kind", "")
+    ga_root = Path(manager.ga_root).resolve()
     if kind == "mykey":
-        target = Path(manager.ga_root) / "mykey.py"
+        target = ga_root / "mykey.py"
+    elif kind == "mykeyTemplate":
+        target = ga_root / "mykey_template.py"
     else:
-        target = Path(data.get("path") or data.get("target") or manager.ga_root)
+        target = Path(data.get("path") or data.get("target") or ga_root)
     target = target.resolve()
+    try:
+        target.relative_to(ga_root)
+    except ValueError:
+        return json_ok({"ok": False, "error": f"Path outside GenericAgent root: {target}"}, status=403)
     if not target.exists():
         return json_ok({"ok": False, "error": f"File not found: {target}"})
     # Actually open the file with the system default editor
@@ -594,7 +654,14 @@ def create_app():
     static_dir = APP_DIR / "desktop" / "static"
 
     async def index_handler(request):
-        return web.FileResponse(static_dir / "index.html")
+        html = (static_dir / "index.html").read_text(encoding="utf-8")
+        bootstrap = (
+            "<script>"
+            f"window.GA_BRIDGE_BOOTSTRAP_TOKEN = {json.dumps(manager.bridge_token)};"
+            "</script>"
+        )
+        html = html.replace("</head>", f"  {bootstrap}\n</head>", 1)
+        return web.Response(text=html, content_type="text/html")
 
     app.router.add_get("/", index_handler)
     app.router.add_static("/", static_dir, show_index=False)
@@ -607,7 +674,7 @@ def create_app():
 
 
 if __name__ == "__main__":
-    host = os.environ.get("BRIDGE_HOST", "127.0.0.1")
+    host = _bridge_bind_host()
     port = int(os.environ.get("BRIDGE_PORT", "14168"))
     print(f"GenericAgent Web2 bridge: http://{host}:{port}  ws://{host}:{port}/ws", file=sys.stderr)
     web.run_app(create_app(), host=host, port=port, print=None)

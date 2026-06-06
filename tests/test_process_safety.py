@@ -47,6 +47,36 @@ class CodeRunSafetyTests(unittest.TestCase):
 
         self.assertIsNotNone(reason)
 
+    def test_blocks_powershell_remove_item(self):
+        reason = ga._unsafe_code_run_reason('Remove-Item -LiteralPath ".\\docs" -Recurse', "powershell")
+
+        self.assertIsNotNone(reason)
+
+    def test_blocks_git_reset_hard(self):
+        reason = ga._unsafe_code_run_reason("git reset --hard HEAD", "powershell")
+
+        self.assertIsNotNone(reason)
+
+    def test_blocks_git_clean_force(self):
+        reason = ga._unsafe_code_run_reason("git clean -fdx", "bash")
+
+        self.assertIsNotNone(reason)
+
+    def test_blocks_find_delete(self):
+        reason = ga._unsafe_code_run_reason("find . -name '*.tmp' -delete", "bash")
+
+        self.assertIsNotNone(reason)
+
+    def test_blocks_python_shutil_rmtree(self):
+        reason = ga._unsafe_code_run_reason('import shutil\nshutil.rmtree("docs")', "python")
+
+        self.assertIsNotNone(reason)
+
+    def test_blocks_python_path_unlink(self):
+        reason = ga._unsafe_code_run_reason('from pathlib import Path\nPath("mykey.py").unlink()', "python")
+
+        self.assertIsNotNone(reason)
+
     def test_allows_normal_python_script(self):
         reason = ga._unsafe_code_run_reason("print('hello')", "python")
 

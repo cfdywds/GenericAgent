@@ -769,7 +769,8 @@ function closeSession(id) {
   const sess = state.sessions.get(id);
   if (sess && sess.bridgeSessionId) {
     const bridgeUrl = window.ga.bridgeUrl || 'http://127.0.0.1:14168';
-    fetch(`${bridgeUrl}/session/${sess.bridgeSessionId}`, { method: 'DELETE' }).catch(() => {});
+    const headers = window.ga.bridgeToken ? { 'X-GA-Bridge-Token': window.ga.bridgeToken } : {};
+    fetch(`${bridgeUrl}/session/${sess.bridgeSessionId}`, { method: 'DELETE', headers }).catch(() => {});
   }
   const keys = [...state.sessions.keys()];
   const idx = keys.indexOf(id);

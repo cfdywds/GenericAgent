@@ -22,6 +22,12 @@ PROTECTED_TOP_DIRS = {
     "model_responses",
     "weights",
     "reflect_logs",
+    "quarantine",
+    "file_backups",
+}
+
+PROTECTED_FILES = {
+    "security_audit.jsonl",
 }
 
 TOP_FILE_PATTERNS = [
@@ -141,6 +147,8 @@ def _collect_top_files(temp_dir: Path, days: float, include_scripts: bool) -> li
     patterns = TOP_FILE_PATTERNS + (SCRIPT_PATTERNS if include_scripts else [])
     for path in temp_dir.iterdir():
         if not path.is_file():
+            continue
+        if path.name in PROTECTED_FILES:
             continue
         if not _matches_any(path.name, patterns):
             continue
@@ -265,7 +273,8 @@ def main() -> int:
     if not temp_dir.exists():
         print(f"temp directory does not exist: {temp_dir}")
         return 0
-    if not _inside(temp_dir, ROOT) and temp_dir != TEMP_DIR.resolve():
+    project_temp = TEMP_DIR.resolve()
+    if temp_dir != project_temp and not _inside(temp_dir, project_temp):
         print(f"refusing to clean non-project temp dir: {temp_dir}")
         return 2
 

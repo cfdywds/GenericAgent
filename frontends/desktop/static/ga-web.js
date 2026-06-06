@@ -6,8 +6,10 @@
   const listeners = new Map();
   let ws = null;
   let cachedBridgeReady = null;
+  let bridgeToken = window.GA_BRIDGE_BOOTSTRAP_TOKEN || null;
   const bridgeBase = `${location.protocol}//${location.hostname}:14168`;
   const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:14168/ws`;
+  const stateChangingMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
   function on(channel, cb) {
     if (typeof cb !== 'function') return () => {};
@@ -31,6 +33,10 @@
   async function http(path, options = {}) {
     const headers = Object.assign({}, options.headers || {});
     const init = Object.assign({}, options, { headers });
+    const method = (init.method || 'GET').toUpperCase();
+    if (bridgeToken && stateChangingMethods.has(method)) {
+      headers['X-GA-Bridge-Token'] = headers['X-GA-Bridge-Token'] || bridgeToken;
+    }
     if (init.body && typeof init.body !== 'string') {
       headers['Content-Type'] = headers['Content-Type'] || 'application/json';
       init.body = JSON.stringify(init.body);
@@ -117,6 +123,7 @@
 
   window.ga = {
     platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32',
+    bridgeToken,
     startBridge: async () => { connectWs(); return http('/status'); },
     stopBridge: async () => ({ ok: true }),
     checkStatus: () => rpc('app/status', {}),

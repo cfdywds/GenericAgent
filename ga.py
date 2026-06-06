@@ -7,6 +7,7 @@ if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from agent_loop import BaseHandler, StepOutcome, json_default
+from security.file_policy import FilePolicy
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 def safe_print(*args, **kwargs):
@@ -32,6 +33,12 @@ def _unsafe_shell_run_reason(code):
         return None
     patterns = _BROAD_KILL_PATTERNS + [
         (r'\bkill\s+-9\s+\$\$\b', "kill targets the current shell process"),
+        (r'\bremove-item\b[^;&|]*(?:-recurse|-force)\b', "Remove-Item performs recursive or forced deletion"),
+        (r'\brm\b[^;&|]*(?:-[^\s;&|]*r|-[^\s;&|]*f)\b', "rm performs recursive or forced deletion"),
+        (r'\b(?:del|erase)\b[^;&|]*(?:/s|/q)\b', "delete command performs broad deletion"),
+        (r'\bgit\s+reset\b[^;&|]*--hard\b', "git reset --hard can discard local work"),
+        (r'\bgit\s+clean\b[^;&|]*-[^\s;&|]*f', "git clean -f can delete untracked files"),
+        (r'\bfind\b[^;&|]*\s-delete\b', "find -delete can remove many files"),
     ]
     for pattern, reason in patterns:
         if re.search(pattern, text, re.IGNORECASE):
@@ -64,9 +71,9 @@ def _python_aliases(tree):
         if isinstance(node, ast.Import):
             for item in node.names:
                 root = item.name.split(".", 1)[0]
-                if root in {"os", "subprocess"}:
+                if root in {"os", "subprocess", "shutil", "pathlib"}:
                     aliases[item.asname or root] = item.name
-        elif isinstance(node, ast.ImportFrom) and node.module in {"os", "subprocess"}:
+        elif isinstance(node, ast.ImportFrom) and node.module in {"os", "subprocess", "shutil", "pathlib"}:
             for item in node.names:
                 aliases[item.asname or item.name] = f"{node.module}.{item.name}"
     return aliases
@@ -86,6 +93,8 @@ def _qualified_name(node, aliases):
             return f"{base}.{attr}" if base and attr else None
         if func == "__import__" and node.args:
             return _literal_str(node.args[0])
+        if func in {"pathlib.Path", "pathlib.PurePath"}:
+            return func
     return None
 
 
@@ -114,6 +123,12 @@ def _unsafe_python_run_reason(code, depth=0):
         func = _qualified_name(node.func, aliases)
         if func == "os._exit":
             return "os._exit() terminates the interpreter immediately"
+
+        if func in {"os.remove", "os.unlink", "os.rmdir", "shutil.rmtree"}:
+            return f"{func} can delete files or directories"
+
+        if func in {"pathlib.Path.unlink", "pathlib.Path.rmdir", "pathlib.PurePath.unlink", "pathlib.PurePath.rmdir"}:
+            return f"{func} can delete files or directories"
 
         if func == "os.kill" and node.args:
             target = node.args[0]
@@ -416,6 +431,19 @@ class GenericAgentHandler(BaseHandler):
         if not path: return ""
         return os.path.abspath(os.path.join(self.cwd, path))   
 
+    def _file_policy(self):
+        return FilePolicy(root=script_dir, cwd=self.cwd)
+
+    def _blocked_file_decision(self, decision, operation):
+        return {
+            "status": "blocked",
+            "operation": operation,
+            "risk": decision.risk,
+            "reason": decision.reason,
+            "path": decision.path,
+            "decision": decision.to_dict(),
+        }
+
     def _extract_code_block(self, response, code_type):
         code_type = {'python':'python|py', 'powershell':'powershell|ps1|pwsh', 'bash':'bash|sh|shell'}.get(code_type, re.escape(code_type))
         matches = re.findall(rf"```(?:{code_type})\n(.*?)\n```", response.content, re.DOTALL)
@@ -479,6 +507,13 @@ class GenericAgentHandler(BaseHandler):
         if save_to_file and "js_return" in result:
             content = str(result["js_return"] or '')
             abs_path = self._get_abs_path(save_to_file)
+            policy = self._file_policy()
+            decision = policy.evaluate("overwrite", abs_path)
+            policy.log_event("overwrite", abs_path, decision, extra={"tool": "web_execute_js", "mode": "save_to_file"})
+            if decision.action != "allow":
+                yield f"[Status] ❌ 安全策略阻止保存 JS 结果: {decision.reason}\n"
+                return StepOutcome(self._blocked_file_decision(decision, "overwrite"), next_prompt="\n")
+            policy.backup_existing(abs_path, reason="web_execute_js save_to_file backup")
             result["js_return"] = smart_format(content, max_str_len=170)
             try:
                 with open(abs_path, 'w', encoding='utf-8') as f: f.write(str(content))
@@ -492,6 +527,96 @@ class GenericAgentHandler(BaseHandler):
         maxlen = 8000 // args.get('_tool_num', 1)
         return StepOutcome(smart_format(result, max_str_len=maxlen), next_prompt=next_prompt)
     
+    def do_web_search(self, args, response):
+        '''搜索互联网。优先Grok Live Search，失败降级到浏览器Google。'''
+        import urllib.request, urllib.error, urllib.parse, ssl as _ssl, re as _re
+        from llmcore import reload_mykeys
+        query = args.get("query", "")
+        max_results = args.get("max_results", 5)
+        if not query:
+            return StepOutcome({"status": "error", "msg": "query is required"}, next_prompt="\n")
+
+        mykeys, _ = reload_mykeys()
+        search_cfg = (
+            mykeys.get("grok2api_search_config")
+            or mykeys.get("grok2api_config")
+            or mykeys.get("web_search_config")
+            or {}
+        )
+        apibase = (search_cfg.get("apibase") or os.environ.get("GROK2API_APIBASE") or "https://grok.obxunil.eu.cc/v1").rstrip("/")
+        endpoint = apibase if apibase.endswith("/chat/completions") else f"{apibase}/chat/completions"
+        apikey = search_cfg.get("apikey") or search_cfg.get("api_key") or os.environ.get("GROK2API_API_KEY") or "123"
+        model = search_cfg.get("model") or os.environ.get("GROK2API_MODEL") or "grok-4.20-0309-non-reasoning"
+
+        # ── 尝试1: Grok Live Search ──
+        try:
+            payload = json.dumps({
+                "model": model,
+                "messages": [{"role": "user", "content": query}],
+                "stream": False,
+                "search_parameters": {"mode": "auto"}
+            }).encode("utf-8")
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            req = urllib.request.Request(
+                endpoint,
+                data=payload,
+                headers={"Authorization": f"Bearer {apikey}", "Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=45, context=ctx) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            choice = data.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            answer = message.get("content", "")
+            sources = []
+            for ann in message.get("annotations", []):
+                if ann.get("type") == "url_citation":
+                    uc = ann.get("url_citation", {})
+                    sources.append({
+                        "url": uc.get("url", ""),
+                        "title": uc.get("title", ""),
+                        "snippet": smart_format(uc.get("snippet", ""), max_str_len=200)
+                    })
+            if answer and answer.strip():
+                self.print(f"[web_search] Grok搜索成功: {query}")
+                return StepOutcome({
+                    "status": "success", "channel": "grok",
+                    "answer": answer, "sources": sources[:max_results],
+                    "query": query, "model": data.get("model", "")
+                }, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+            raise ValueError("Grok returned empty answer")
+        except Exception as e:
+            self.print(f"[web_search] Grok搜索失败({e})，降级到浏览器Google... 可在 mykey.py 配置 grok2api_search_config 或设置 GROK2API_APIBASE/GROK2API_API_KEY/GROK2API_MODEL")
+
+        # ── 尝试2: 降级到浏览器Google ──
+        try:
+            encoded_q = urllib.parse.quote(query)
+            web_execute_js(f'window.location.href="https://www.google.com/search?q={encoded_q}"')
+            time.sleep(2)
+            scan_result = web_scan(text_only=True)
+            page_text = (scan_result.get("content") or scan_result.get("text") or "") if isinstance(scan_result, dict) else str(scan_result)
+            lines = [ln.strip() for ln in page_text.split('\n') if ln.strip() and len(ln.strip()) > 20]
+            snippets = lines[:max_results * 3]
+            summary = '\n'.join(snippets[:15])
+            if summary.strip():
+                self.print(f"[web_search] 降级Google搜索成功: {query}")
+                return StepOutcome({
+                    "status": "success", "channel": "google_fallback",
+                    "answer": summary,
+                    "sources": [{"url": f"https://www.google.com/search?q={encoded_q}", "title": "Google Search", "snippet": ""}],
+                    "query": query
+                }, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+            raise ValueError("Google returned empty page")
+        except Exception as e2:
+            self.print(f"[web_search] 降级Google也失败: {e2}")
+            return StepOutcome({
+                "status": "error",
+                "msg": f"Grok失败, Google降级也失败: {e2}",
+                "grok_config_hint": "Configure grok2api_search_config in mykey.py or set GROK2API_APIBASE/GROK2API_API_KEY/GROK2API_MODEL.",
+            }, next_prompt="\n")
+    
     def do_file_patch(self, args, response):
         path = self._get_abs_path(args.get("path", ""))
         yield f"[Action] Patching file: {path}\n"
@@ -501,6 +626,14 @@ class GenericAgentHandler(BaseHandler):
         except ValueError as e:
             yield f"[Status] ❌ 引用展开失败: {e}\n"
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+        policy = self._file_policy()
+        decision = policy.evaluate("patch", path)
+        policy.log_event("patch", path, decision, extra={"tool": "file_patch"})
+        if decision.action != "allow":
+            result = self._blocked_file_decision(decision, "patch")
+            yield f"[Status] ❌ 安全策略阻止 patch: {decision.reason}\n"
+            return StepOutcome(result, next_prompt="\n")
+        policy.backup_existing(path, reason="file_patch backup")
         result = file_patch(path, old_content, new_content)
         yield f"\n{str(result)}\n"
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
@@ -511,6 +644,11 @@ class GenericAgentHandler(BaseHandler):
         需要将要写入的内容放在<file_content>标签内，或者放在代码块中'''
         path = self._get_abs_path(args.get("path", ""))
         mode = args.get("mode", "overwrite")  # overwrite/append/prepend
+        valid_modes = {"overwrite", "append", "prepend"}
+        if mode not in valid_modes:
+            msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(valid_modes))}"
+            yield f"[Status] ❌ {msg}\n"
+            return StepOutcome({"status": "error", "msg": msg}, next_prompt="\n")
         action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
         yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
 
@@ -527,6 +665,14 @@ class GenericAgentHandler(BaseHandler):
             return StepOutcome({"status": "error", "msg": "No content found. Blank is not supported. Put content inside <file_content>...</file_content> tags in your reply body before call file_write."}, next_prompt="\n")
         try:
             new_content = expand_file_refs(content, base_dir=self.cwd)
+            operation = "overwrite" if mode == "overwrite" else mode
+            policy = self._file_policy()
+            decision = policy.evaluate(operation, path)
+            policy.log_event(operation, path, decision, extra={"tool": "file_write", "mode": mode})
+            if decision.action != "allow":
+                yield f"[Status] ❌ 安全策略阻止写入: {decision.reason}\n"
+                return StepOutcome(self._blocked_file_decision(decision, operation), next_prompt="\n")
+            policy.backup_existing(path, reason=f"file_write {mode} backup")
             if mode == "prepend":
                 old = open(path, 'r', encoding="utf-8").read() if os.path.exists(path) else ""
                 open(path, 'w', encoding="utf-8").write(new_content + old)
@@ -538,6 +684,15 @@ class GenericAgentHandler(BaseHandler):
         except Exception as e:
             yield f"[Status] ❌ 写入异常: {str(e)}\n"
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+
+    def do_restore_quarantine(self, args, response):
+        quarantine_id = (args.get("quarantine_id") or "").strip()
+        if not quarantine_id:
+            return StepOutcome({"status": "error", "msg": "quarantine_id is required"}, next_prompt="\n")
+        result = self._file_policy().restore_quarantine(quarantine_id)
+        yield f"[Status] restore_quarantine: {result}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(result, next_prompt=next_prompt)
         
     def do_file_read(self, args, response):
         '''读取文件内容。从第start行开始读取。如有keyword则返回第一个keyword(忽略大小写)周边内容'''
