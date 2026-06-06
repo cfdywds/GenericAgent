@@ -54,6 +54,7 @@ memory/L4_raw_sessions/*
 !memory/ljqCtrl.py
 !memory/ljqCtrl_sop.md
 !memory/ljqCtrl_cases.md
+!memory/computer_use.md
 
 # procmem_scanner related tools
 !memory/procmem_scanner.py
