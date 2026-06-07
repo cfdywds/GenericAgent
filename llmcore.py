@@ -1,4 +1,4 @@
-import os, json, re, time, requests, sys, threading, urllib3, base64, importlib, uuid
+import os, json, re, time, requests, sys, threading, urllib3, base64, importlib, uuid, ast
 from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4())
@@ -906,15 +906,16 @@ def _ensure_text_block(blocks):
     blocks.insert(1, {"type": "text", "text": txt})
     return txt
 
-def _redact_sensitive_text(content):
-    text = str(content)
+_SENSITIVE_FIELD_RE = re.compile(r'(?i)(authorization|api[_-]?key|apikey|secret|token|password|cookie)')
+
+def _redact_freeform_text(text):
     patterns = [
         (r'(?i)(["\']authorization["\']\s*:\s*["\']bearer\s+)[^"\']+(["\'])', r'\1[REDACTED]\2'),
         (r'(?i)(authorization\s*[:=]\s*bearer\s+)[^\s\"\']+', r'\1[REDACTED]'),
         (r'(?i)(["\'](?:api[_-]?key|apikey|secret|token|password)["\']\s*:\s*["\'])[^"\']+(["\'])', r'\1[REDACTED]\2'),
-        (r'(?i)((?:api[_-]?key|apikey|secret|token|password)\s*[=:]\s*)([\"\']?)[^\s,;\}\]\"\']+(\2)', r'\1\2[REDACTED]\3'),
+        (r'(?i)((?:api[_-]?key|apikey|secret|token|password)\s*[=:]\s*)([\"\']?)[^\s,;&\}\]\"\']+(\2)', r'\1\2[REDACTED]\3'),
         (r'(?i)(["\']cookie["\']\s*:\s*["\'])[^"\']+(["\'])', r'\1[REDACTED]\2'),
-        (r'(?i)(cookie\s*[:=]\s*)[^\n\r]+', r'\1[REDACTED]'),
+        (r'(?i)((?:set-)?cookie\s*[:=]\s*)[^\n\r]+', r'\1[REDACTED]'),
         (r'\beyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\b', '[REDACTED]'),
         (r'\bgh[opsu]_[A-Za-z0-9_]{20,}\b', '[REDACTED]'),
         (r'\bAKIA[0-9A-Z]{16}\b', '[REDACTED]'),
@@ -924,6 +925,39 @@ def _redact_sensitive_text(content):
     for pattern, repl in patterns:
         text = re.sub(pattern, repl, text)
     return text
+
+def _redact_structured_value(value):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if _SENSITIVE_FIELD_RE.search(str(key)):
+                out[key] = '[REDACTED]'
+            else:
+                out[key] = _redact_structured_value(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_structured_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_structured_value(item) for item in value)
+    if isinstance(value, str):
+        return _redact_freeform_text(value)
+    return value
+
+def _redact_sensitive_text(content):
+    text = str(content)
+    stripped = text.strip()
+    if stripped[:1] in ('{', '['):
+        try:
+            redacted = _redact_structured_value(json.loads(text))
+            return json.dumps(redacted, ensure_ascii=False, indent=2 if '\n' in text else None)
+        except Exception:
+            pass
+        try:
+            redacted = _redact_structured_value(ast.literal_eval(text))
+            return repr(redacted)
+        except Exception:
+            pass
+    return _redact_freeform_text(text)
 
 def _write_llm_log(label, content, log_path=None):
     if not log_path:

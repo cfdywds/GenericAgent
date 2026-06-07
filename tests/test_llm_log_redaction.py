@@ -1,6 +1,7 @@
 import pathlib
 import tempfile
 import unittest
+import json
 
 
 class LlmLogRedactionTests(unittest.TestCase):
@@ -57,6 +58,35 @@ class LlmLogRedactionTests(unittest.TestCase):
         self.assertNotIn("query-secret", text)
         self.assertNotIn("token-secret", text)
         self.assertIn("[REDACTED]", text)
+
+    def test_write_llm_log_redacts_json_without_corrupting_prompt(self):
+        import llmcore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = pathlib.Path(tmp) / "model_responses_test.txt"
+            prompt = {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "curl output\n"
+                            "< Set-Cookie: sessionid=json-cookie; csrftoken=csrf-secret\r\r\n"
+                            "< Content-Type: text/html"
+                        ),
+                    }
+                ],
+            }
+            llmcore._write_llm_log("Prompt", json.dumps(prompt, ensure_ascii=False, indent=2), str(log_path))
+
+            text = log_path.read_text(encoding="utf-8")
+
+        body = text.split("\n", 1)[1].strip()
+        restored = json.loads(body)
+        restored_text = restored["content"][0]["text"]
+        self.assertNotIn("json-cookie", restored_text)
+        self.assertNotIn("csrf-secret", restored_text)
+        self.assertIn("Set-Cookie: [REDACTED]", restored_text)
 
 
 if __name__ == "__main__":

@@ -121,6 +121,79 @@ def _parse_native_history(pairs):
         history.append({'role': 'assistant', 'content': blocks})
     return history
 
+
+def _copy_native_message(msg):
+    copied = dict(msg)
+    content = copied.get('content')
+    if isinstance(content, list):
+        copied['content'] = [dict(b) if isinstance(b, dict) else b for b in content]
+    return copied
+
+
+def _sanitize_native_tool_edges(history):
+    cleaned = [_copy_native_message(m) for m in history or [] if isinstance(m, dict)]
+    while True:
+        tool_use_ids, tool_result_ids = set(), set()
+        for msg in cleaned:
+            content = msg.get('content') or []
+            if not isinstance(content, list):
+                continue
+            if msg.get('role') == 'assistant':
+                tool_use_ids.update(
+                    b.get('id') for b in content
+                    if isinstance(b, dict) and b.get('type') == 'tool_use' and b.get('id')
+                )
+            elif msg.get('role') == 'user':
+                tool_result_ids.update(
+                    b.get('tool_use_id') for b in content
+                    if isinstance(b, dict) and b.get('type') == 'tool_result' and b.get('tool_use_id')
+                )
+        paired_ids = tool_use_ids & tool_result_ids
+        changed = False
+        next_cleaned = []
+        for msg in cleaned:
+            content = msg.get('content')
+            if not isinstance(content, list):
+                next_cleaned.append(msg)
+                continue
+            new_content = []
+            for block in content:
+                if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id') not in paired_ids:
+                    changed = True
+                    continue
+                if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id') not in paired_ids:
+                    changed = True
+                    continue
+                new_content.append(block)
+            if new_content:
+                new_msg = dict(msg)
+                new_msg['content'] = new_content
+                next_cleaned.append(new_msg)
+            else:
+                changed = True
+        cleaned = next_cleaned
+        if not changed:
+            return cleaned
+
+
+def _parse_native_history_tolerant(pairs):
+    history, skipped = [], 0
+    for p, r in pairs:
+        try:
+            user_msg = json.loads(p)
+            blocks = ast.literal_eval(r)
+            if not (isinstance(user_msg, dict) and user_msg.get('role') == 'user'):
+                raise ValueError('prompt is not a native user message')
+            if not isinstance(blocks, list):
+                raise ValueError('response is not a native block list')
+        except Exception:
+            skipped += 1
+            continue
+        history.append(user_msg)
+        history.append({'role': 'assistant', 'content': blocks})
+    history = _sanitize_native_tool_edges(history)
+    return (history or None), skipped
+
 _PREVIEW_WIN = 32 * 1024
 
 # Content-grep budget for `/continue` search box: read at most this many bytes
@@ -451,12 +524,15 @@ def restore(agent, path):
     except Exception as e: return f'❌ 读取失败: {e}', False
     pairs = _pairs(content)
     if not pairs: return f'❌ {os.path.basename(path)} 为空或格式不符', False
-    history = _parse_native_history(pairs)
+    history, skipped = _parse_native_history_tolerant(pairs)
     name = os.path.basename(path)
     if history is not None:
         agent.abort()
         _replace_backend_history(agent, history)
-        return f'✅ 已恢复 {len(pairs)} 轮完整对话（{name}）\n(已写入 backend.history，可直接继续)', True
+        n = len(history) // 2
+        if skipped:
+            return f'✅ 已恢复 {n} 轮可解析对话，跳过 {skipped} 轮损坏记录（{name}）\n(已写入 backend.history，可直接继续)', True
+        return f'✅ 已恢复 {n} 轮完整对话（{name}）\n(已写入 backend.history，可直接继续)', True
     from chatapp_common import _restore_native_history, _restore_text_pairs
     summary = _restore_text_pairs(content) or _restore_native_history(content)
     if not summary: return f'❌ {name} 无法解析（非 native 且无摘要可提取）', False
@@ -603,6 +679,11 @@ def extract_ui_messages(path):
 
     out, assistant, round_turn = [], None, 0
     for i, (prompt, response) in enumerate(pairs):
+        try:
+            json.loads(prompt)
+            ast.literal_eval(response)
+        except Exception:
+            continue
         user = _user_text(prompt)
         seg = _format_response_segment(response, next_tr[i])
         if user:
