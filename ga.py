@@ -543,30 +543,65 @@ class GenericAgentHandler(BaseHandler):
             or mykeys.get("web_search_config")
             or {}
         )
+        def _usable_secret(value):
+            value = str(value or "").strip()
+            lowered = value.lower()
+            if lowered in {"", "changeme", "your-api-key", "your_api_key", "<your-grok2api-key>", "sk-<your-grok2api-key>"}:
+                return ""
+            if "<your-" in lowered:
+                return ""
+            return value
+
+        def _format_grok_error(err):
+            if isinstance(err, urllib.error.HTTPError):
+                try:
+                    body = err.read().decode("utf-8", errors="replace").strip()
+                except Exception:
+                    body = ""
+                msg = f"HTTP {err.code} {err.reason}"
+                if body:
+                    msg += f": {smart_format(body, max_str_len=500)}"
+                return msg
+            return f"{type(err).__name__}: {err}"
+
         apibase = (search_cfg.get("apibase") or os.environ.get("GROK2API_APIBASE") or "https://grok.obxunil.eu.cc/v1").rstrip("/")
         endpoint = apibase if apibase.endswith("/chat/completions") else f"{apibase}/chat/completions"
-        apikey = search_cfg.get("apikey") or search_cfg.get("api_key") or os.environ.get("GROK2API_API_KEY") or "123"
+        apikey = (
+            _usable_secret(search_cfg.get("apikey"))
+            or _usable_secret(search_cfg.get("api_key"))
+            or _usable_secret(os.environ.get("GROK2API_API_KEY"))
+            or "123"
+        )
         model = search_cfg.get("model") or os.environ.get("GROK2API_MODEL") or "grok-4.20-0309-non-reasoning"
+        grok_error = ""
 
-        # ── 尝试1: Grok Live Search ──
-        try:
-            payload = json.dumps({
+        def _request_grok(include_live_search):
+            body = {
                 "model": model,
                 "messages": [{"role": "user", "content": query}],
                 "stream": False,
-                "search_parameters": {"mode": "auto"}
-            }).encode("utf-8")
+            }
+            if include_live_search:
+                body["search_parameters"] = {"mode": "auto"}
+            payload = json.dumps(body).encode("utf-8")
             ctx = _ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = _ssl.CERT_NONE
             req = urllib.request.Request(
                 endpoint,
                 data=payload,
-                headers={"Authorization": f"Bearer {apikey}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {apikey}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                },
                 method="POST"
             )
             with urllib.request.urlopen(req, timeout=45, context=ctx) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                return json.loads(resp.read().decode("utf-8"))
+
+        def _grok_success_outcome(data, channel):
             choice = data.get("choices", [{}])[0]
             message = choice.get("message", {})
             answer = message.get("content", "")
@@ -582,12 +617,30 @@ class GenericAgentHandler(BaseHandler):
             if answer and answer.strip():
                 self.print(f"[web_search] Grok搜索成功: {query}")
                 return StepOutcome({
-                    "status": "success", "channel": "grok",
+                    "status": "success", "channel": channel,
                     "answer": answer, "sources": sources[:max_results],
                     "query": query, "model": data.get("model", "")
                 }, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
             raise ValueError("Grok returned empty answer")
+
+        # ── 尝试1: Grok Live Search ──
+        try:
+            if not apikey:
+                raise ValueError("grok2api API key is missing or placeholder")
+            try:
+                data = _request_grok(include_live_search=True)
+                return _grok_success_outcome(data, "grok")
+            except Exception as live_exc:
+                live_error = _format_grok_error(live_exc)
+                self.print(f"[web_search] Grok live search失败({live_error})，重试普通Grok chat...")
+                try:
+                    data = _request_grok(include_live_search=False)
+                    return _grok_success_outcome(data, "grok_chat_fallback")
+                except Exception as chat_exc:
+                    chat_error = _format_grok_error(chat_exc)
+                    raise RuntimeError(f"live search failed: {live_error}; chat fallback failed: {chat_error}") from chat_exc
         except Exception as e:
+            grok_error = _format_grok_error(e)
             self.print(f"[web_search] Grok搜索失败({e})，降级到浏览器Google... 可在 mykey.py 配置 grok2api_search_config 或设置 GROK2API_APIBASE/GROK2API_API_KEY/GROK2API_MODEL")
 
         # ── 尝试2: 降级到浏览器Google ──
@@ -610,10 +663,13 @@ class GenericAgentHandler(BaseHandler):
                 }, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
             raise ValueError("Google returned empty page")
         except Exception as e2:
+            google_error = str(e2)
             self.print(f"[web_search] 降级Google也失败: {e2}")
             return StepOutcome({
                 "status": "error",
                 "msg": f"Grok失败, Google降级也失败: {e2}",
+                "grok_error": grok_error,
+                "google_error": google_error,
                 "grok_config_hint": "Configure grok2api_search_config in mykey.py or set GROK2API_APIBASE/GROK2API_API_KEY/GROK2API_MODEL.",
             }, next_prompt="\n")
     
