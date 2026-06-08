@@ -293,7 +293,12 @@ def web_scan(tabs_only=False, switch_tab_id=None, text_only=False, maxlen=35000)
             }
         }
         if not tabs_only: 
-            importlib.reload(simphtml); result["content"] = simphtml.get_html(driver, cutlist=True, maxchars=maxlen, text_only=text_only)
+            global simphtml
+            if 'simphtml' in sys.modules:
+                simphtml = importlib.reload(sys.modules['simphtml'])
+            else:
+                simphtml = importlib.import_module('simphtml')
+            result["content"] = simphtml.get_html(driver, cutlist=True, maxchars=maxlen, text_only=text_only)
             if text_only: result['content'] = smart_format(result['content'], max_str_len=maxlen//3, omit_str='\n\n[omitted long content]\n\n')
         return result
     except Exception as e:
