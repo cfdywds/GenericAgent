@@ -10,6 +10,7 @@
 
 <p>
 
+  <a href="https://gaagent.ai"><img src="https://img.shields.io/badge/Official_Website-gaagent.ai-00A67E?style=flat-square" alt="Official Website"/></a>
   <a href="https://arxiv.org/abs/2604.17091"><img src="https://img.shields.io/badge/Technical_Report-PDF-EA4335?style=flat-square&logo=adobeacrobatreader&logoColor=white" alt="Technical Report"/></a>
   <a href="https://github.com/JinyiHan99/GA-Technical-Report"><img src="https://img.shields.io/badge/Code_%26_Data-Reproduction-181717?style=flat-square&logo=github" alt="Reproduction Repo"/></a>
   <a href="https://datawhalechina.github.io/hello-generic-agent/"><img src="https://img.shields.io/badge/Tutorial-Datawhale-blue?style=flat-square" alt="Tutorial"/></a>
@@ -24,8 +25,7 @@
 
 </div>
 
-> 📌 **Official Channel** — This GitHub repository is the **only** official source of GenericAgent.
-> We have no affiliation with any third-party website using the GenericAgent name.
+> 📌 **Official:** GitHub + https://gaagent.ai only. DintalClaw is the sole authorized commercial partner; others are not affiliated.
 
 ---
 
@@ -347,6 +347,21 @@ Baselines across these dimensions include **Claude Code**, **OpenAI CodeX**, and
   </tr>
 </table>
 
+### Browser Realness of GA Web Tools
+
+GA web tools run through a **real, persistent Chrome/Chromium session** rather than a disposable headless sandbox, preserving cookies, login state, extensions, GPU/WebGL behavior, and normal browser-session fingerprints.
+
+| Detection Service / Signal | Vanilla Headless Automation | GA Web Tools | Notes |
+| :--- | :---: | :---: | :--- |
+| SannySoft headless test | Often detected | ✅ 56/56 passed | `bot.sannysoft.com` |
+| bot.incolumitas.com | Commonly fails webdriver / CDP checks | ✅ 36/36 passed | `WEBDRIVER`, `SELENIUM_DRIVER`, `webDriverAdvanced` all OK |
+| BrowserScan bot detection | Often abnormal | ✅ Normal | `browserscan.net` |
+| Device & Browser Info bot test | Multiple bot flags | ✅ Human / `isBot=false` | `deviceandbrowserinfo.com` |
+| FingerprintJS bot detection demo | Often detected | ✅ Passed | Demo flow completed without bot verdict |
+| reCAPTCHA v3 demo | Low bot-like score | ✅ 0.9 human-like score | Score-based risk signal; 0.9 is above typical production thresholds |
+
+For reCAPTCHA v3, `0.9` is not a "checkbox solved" result; it is the high-confidence human-like score returned by the risk model, typically sufficient to avoid extra challenges in production flows.
+
 ---
 
 ## 📅 Roadmap & News
@@ -372,16 +387,6 @@ Baselines across these dimensions include **Claude Code**, **OpenAI CodeX**, and
 
 If this project helped you, please consider leaving a **Star!** 🙏
 
-You're also welcome to join the **GenericAgent Community Group** for discussion, feedback, and co-building 👏
-
-<div align="center">
-  <table>
-    <tr>
-      <td align="center"><strong>WeChat Group 21</strong><br/><img src="assets/images/wechat_group21.jpg" alt="WeChat Group 21 QR" width="240"/></td>
-    </tr>
-  </table>
-</div>
-
 ### 🚩 Friendly Links
 
 Thanks to the **LinuxDo** community for the support!
@@ -400,7 +405,7 @@ Thanks to the **LinuxDo** community for the support!
 
 Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for full text.
 
-> *Disclaimer: This project does not build or operate any commercial website. Apart from DintalClaw, no institution, organization, or individual is currently officially authorized to conduct commercial activities under the GenericAgent name.*
+> *Disclaimer: The official GenericAgent channels are this GitHub repository and https://gaagent.ai. DintalClaw is currently the only officially authorized commercial partner; any other third-party website, organization, or individual using the GenericAgent name is not official unless explicitly listed here.*
 
 ---
 
@@ -721,6 +726,21 @@ GenericAgent 通过 **分层记忆 × 最小工具集 × 自主执行循环** �
   </tr>
 </table>
 
+### GA Web 工具的浏览器真实性
+
+GA Web 工具运行在**真实、持久化的 Chrome/Chromium 会话**中，而不是一次性的 headless 沙箱，因此可以保留 Cookie、登录态、扩展、GPU/WebGL 行为以及正常浏览器会话指纹。
+
+| 检测服务 / 信号 | 普通 Headless 自动化 | GA Web 工具 | 说明 |
+| :--- | :---: | :---: | :--- |
+| SannySoft headless test | 常被识别 | ✅ 56/56 通过 | `bot.sannysoft.com` |
+| bot.incolumitas.com | 常在 webdriver / CDP 项异常 | ✅ 36/36 通过 | `WEBDRIVER`、`SELENIUM_DRIVER`、`webDriverAdvanced` 全部 OK |
+| BrowserScan bot detection | 常显示异常 | ✅ Normal | `browserscan.net` |
+| Device & Browser Info bot test | 多个 bot 标记 | ✅ Human / `isBot=false` | `deviceandbrowserinfo.com` |
+| FingerprintJS bot detection demo | 常被识别 | ✅ 通过 | Demo 流程完成，未给出 bot 判定 |
+| reCAPTCHA v3 demo | 低分 / bot-like | ✅ 0.9 真人相似分 | v3 是基于分数的风险信号；0.9 高于常见生产阈值 |
+
+对于 reCAPTCHA v3，`0.9` 不是“点过验证码”的结果，而是风控模型返回的高置信真人相似分，通常足以通过生产环境中的常见阈值，避免进入更严格挑战。
+
 ---
 
 ## 📅 路线图与最新动态
@@ -774,7 +794,7 @@ GenericAgent 通过 **分层记忆 × 最小工具集 × 自主执行循环** �
 
 基于 **MIT License** 发布，详见 [`LICENSE`](LICENSE)。
 
-> *声明：本项目未构建任何商业站点；除 DintalClaw 外，目前未官方授权任何机构、组织或个人以 GenericAgent 名义从事商业活动。*
+> *声明：GenericAgent 官方渠道为本 GitHub 仓库和 https://gaagent.ai。DintalClaw 是目前唯一官方授权的商业合作方；除非在此处明确列出，其他使用 GenericAgent 名义的第三方网站、机构、组织或个人均非官方。*
 
 ---
 
