@@ -2,13 +2,14 @@ import io
 import math
 import os
 import pathlib
+import queue
 import sys
 import time
 import tempfile
 import unittest
 from itertools import count
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -708,6 +709,128 @@ class SidebarRenderTests(unittest.TestCase):
         self.assertEqual(after, before)
         self.assertEqual(target.sidebar_sort_at, 300.0)
 
+    def test_switch_to_lazy_history_loads_ui_without_restoring_backend(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        with tempfile.TemporaryDirectory() as tmp:
+            source_log = os.path.join(tmp, "model_responses_111111.txt")
+            with open(source_log, "wb") as fh:
+                fh.write(b"=== Prompt === 2026-06-06 01:19:14\nsame\n=== Response ===\nsame\n")
+            current = tui.AgentSession(agent_id=1, name="current", status="idle")
+            target = tui.AgentSession(
+                agent_id=2,
+                name="history",
+                status="history",
+                lazy_history_path=source_log,
+                lazy_history_mtime=300.0,
+                lazy_history_preview="target",
+                lazy_history_rounds=2,
+            )
+            app.sessions = {1: current, 2: target}
+            app.current_id = 1
+
+            import continue_cmd
+
+            with patch.object(app, "_start_agent_for_session") as start_mock, \
+                 patch.object(app, "_refresh_all") as refresh_mock, \
+                 patch.object(continue_cmd, "restore") as restore_mock, \
+                 patch.object(tui, "continue_extract", return_value=[
+                     {"role": "assistant", "content": "restored body"},
+                 ]):
+                self.assertTrue(app._switch_session(2))
+
+        self.assertEqual(app.current_id, 2)
+        self.assertEqual(refresh_mock.call_count, 1)
+        start_mock.assert_not_called()
+        restore_mock.assert_not_called()
+        self.assertIsNone(target.agent)
+        self.assertEqual(target.lazy_history_path, source_log)
+        self.assertTrue(target.history_ui_loaded)
+        self.assertTrue(target.messages[0].history_light_render)
+
+    def test_switch_to_large_lazy_history_uses_metadata_preview(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        app._HISTORY_UI_PREVIEW_ONLY_BYTES = 10
+        with tempfile.TemporaryDirectory() as tmp:
+            source_log = os.path.join(tmp, "model_responses_111111.txt")
+            with open(source_log, "wb") as fh:
+                fh.write(b"x" * 128)
+            current = tui.AgentSession(agent_id=1, name="current", status="idle")
+            target = tui.AgentSession(
+                agent_id=2,
+                name="history",
+                status="history",
+                lazy_history_path=source_log,
+                lazy_history_preview="preview text",
+                lazy_history_rounds=12,
+            )
+            app.sessions = {1: current, 2: target}
+            app.current_id = 1
+
+            with patch.object(tui, "continue_extract") as extract_mock, \
+                 patch.object(app, "_refresh_all"):
+                self.assertTrue(app._switch_session(2))
+
+        extract_mock.assert_not_called()
+        self.assertEqual(target.messages[0].role, "system")
+        self.assertIn("preview text", target.messages[0].content)
+        self.assertIn("12 轮", target.messages[0].content)
+
+    def test_submit_from_lazy_history_restores_backend_before_put_task(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        with tempfile.TemporaryDirectory() as tmp:
+            source_log = os.path.join(tmp, "model_responses_111111.txt")
+            live_log = os.path.join(tmp, "model_responses_222222.txt")
+            with open(source_log, "wb") as fh:
+                fh.write(b"=== Prompt === 2026-06-06 01:19:14\nsame\n=== Response ===\nsame\n")
+            sess = tui.AgentSession(
+                agent_id=1,
+                name="history",
+                status="history",
+                lazy_history_path=source_log,
+                lazy_history_mtime=300.0,
+                lazy_history_preview="target",
+                lazy_history_rounds=2,
+            )
+            app.sessions = {1: sess}
+            app.current_id = 1
+            fake_agent = SimpleNamespace(
+                log_path=live_log,
+                put_task=Mock(return_value=queue.Queue()),
+            )
+
+            def start_agent(target):
+                target.agent = fake_agent
+                return fake_agent
+
+            import continue_cmd
+
+            with patch.object(app, "_start_agent_for_session", side_effect=start_agent), \
+                 patch.object(app, "_refresh_all"), \
+                 patch.object(continue_cmd, "reset_conversation"), \
+                 patch.object(continue_cmd, "restore", return_value=("✅ 已恢复", True)), \
+                 patch.object(tui, "continue_extract", return_value=[]):
+                tid = app.submit_user_message("continue from history")
+
+        self.assertEqual(tid, 1)
+        self.assertIsNone(sess.lazy_history_path)
+        fake_agent.put_task.assert_called_once_with("continue from history", source="user")
+
+    def test_large_restored_history_uses_lightweight_render(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        app._HISTORY_LIGHT_RENDER_THRESHOLD = 10
+        msg = tui.ChatMessage(
+            role="assistant",
+            content="large restored assistant body",
+            history_light_render=True,
+        )
+
+        with patch.object(app, "_render_md") as render_mock:
+            segs = app._assistant_segments(msg, 100)
+
+        render_mock.assert_not_called()
+        self.assertEqual(len(segs), 1)
+        self.assertEqual(segs[0][0], "text")
+
     def test_tick_discovers_new_goal_child_history_while_launcher_is_active(self):
         app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
         app._ids = count(2)
@@ -744,6 +867,60 @@ class SidebarRenderTests(unittest.TestCase):
 
         self.assertEqual([row.sid for row in rows], [1, 2])
         self.assertEqual(rows[1].sess.sidebar_parent_log, parent_log)
+
+    def test_tick_throttles_sidebar_refresh_while_launcher_is_active(self):
+        app = tui.GenericAgentTUI(agent_factory=lambda: SimpleNamespace())
+        parent_log = "D:/tmp/model_responses_parent.txt"
+        launcher = tui.AgentSession(agent_id=1, name="goal launcher", status="idle")
+        launcher.agent = SimpleNamespace(
+            log_path=parent_log,
+            llmclient=SimpleNamespace(backend=SimpleNamespace(history=[])),
+        )
+        launcher.sidebar_kind = "goal_launcher"
+        app.sessions = {1: launcher}
+        app.current_id = 1
+        app._last_size = (80, 24)
+        app._next_history_sidebar_sync_at = time.time() + 60.0
+
+        with patch.object(app, "_refresh_topbar"), \
+             patch.object(app, "_refresh_sidebar") as sidebar_mock, \
+             patch.object(app, "_apply_responsive_layout"), \
+             patch.object(app, "_sync_history_sidebar_sessions") as sync_mock:
+            app._tick()
+
+        sync_mock.assert_not_called()
+        sidebar_mock.assert_not_called()
+
+    def test_refresh_topbar_skips_noop_widget_update(self):
+        sess = tui.AgentSession(agent_id=1, name="main", status="idle")
+        sess.agent = SimpleNamespace(
+            get_llm_name=lambda model=True: "test-model",
+            llmclient=SimpleNamespace(backend=SimpleNamespace(reasoning_effort="")),
+        )
+        topbar = SimpleNamespace(update=Mock())
+        app = SimpleNamespace(
+            is_mounted=True,
+            current_id=1,
+            current=sess,
+            sessions={1: sess},
+            _busy_since=None,
+            _chip_timer=None,
+            _topbar_sig=(),
+            fold_mode=True,
+            theme="ga-default",
+            size=SimpleNamespace(width=100),
+            query_one=lambda *args, **kwargs: topbar,
+            set_interval=Mock(),
+            _ensure_title_timer=Mock(),
+            _update_terminal_title=Mock(),
+        )
+
+        tui.GenericAgentTUI._refresh_topbar(app)
+        tui.GenericAgentTUI._refresh_topbar(app)
+
+        self.assertEqual(topbar.update.call_count, 1)
+        self.assertEqual(app._ensure_title_timer.call_count, 2)
+        self.assertEqual(app._update_terminal_title.call_count, 2)
 
 
 if __name__ == "__main__":

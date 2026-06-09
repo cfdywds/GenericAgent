@@ -1286,6 +1286,9 @@ class ChatMessage:
     search_query: str = ""
     all_choices: Optional[list] = field(default=None, repr=False)
     image_paths: list[str] = field(default_factory=list)
+    # Restored history can contain megabyte-scale assistant blocks; render those
+    # as plain selectable text to keep session switching responsive.
+    history_light_render: bool = False
     _role_widget: Any = field(default=None, repr=False)
     _hint_widget: Any = field(default=None, repr=False)
     _body_widget: Any = field(default=None, repr=False)
@@ -1356,6 +1359,7 @@ class AgentSession:
     # Startup sidebar entries for past logs are lazy: they show metadata first,
     # then materialize into a real agent session only when selected.
     lazy_history_path: Optional[str] = None
+    history_ui_loaded: bool = False
     history_source_paths: list[str] = field(default_factory=list)
     lazy_history_mtime: float = 0.0
     lazy_history_preview: str = ""
@@ -3320,6 +3324,8 @@ class ThemePicker(ModalScreen):
 class GenericAgentTUI(App[None]):
 
     CSS = _MAIN_CSS
+    _HISTORY_LIGHT_RENDER_THRESHOLD = 0
+    _HISTORY_UI_PREVIEW_ONLY_BYTES = 256 * 1024
 
     BINDINGS = [
         Binding("ctrl+c",     "handle_ctrl_c", "Stop/Quit", show=False, priority=True),
@@ -3370,6 +3376,7 @@ class GenericAgentTUI(App[None]):
         self._last_title: str = ""
         self._history_sidebar_sync_interval: float = 2.0
         self._next_history_sidebar_sync_at: float = 0.0
+        self._topbar_sig: tuple = ()
         # Register our github-dark palette as a first-class Textual theme; the other
         # cycle entries are Textual built-ins (nord, gruvbox, dracula, tokyo-night,
         # textual-light), whose ga-* CSS slots are derived in get_css_variables.
@@ -3504,8 +3511,10 @@ class GenericAgentTUI(App[None]):
         # 0.5s poll: refresh clock + detect resizes Windows misses (snap, fullscreen).
         self._refresh_topbar()
         if self._sidebar_needs_liveness_poll():
-            self._sync_history_sidebar_sessions()
-            self._refresh_sidebar()
+            now = time.time()
+            if now >= self._next_history_sidebar_sync_at:
+                self._sync_history_sidebar_sessions(force=True)
+                self._refresh_sidebar()
         size = (self.size.width, self.size.height)
         if size != self._last_size:
             self._last_size = size
@@ -3778,7 +3787,11 @@ class GenericAgentTUI(App[None]):
             try: self._plan_mtime.pop(sess.agent_id, None)
             except Exception: pass
             for h in continue_extract(path):
-                sess.messages.append(ChatMessage(role=h["role"], content=h["content"]))
+                sess.messages.append(ChatMessage(
+                    role=h["role"],
+                    content=h["content"],
+                    history_light_render=True,
+                ))
             sess.plan_scan_baseline = 0
             try:
                 import plan_state
@@ -3814,6 +3827,7 @@ class GenericAgentTUI(App[None]):
                 sess.history_source_paths.append(path)
             sess.status = "idle"
             sess.lazy_history_path = None
+            sess.history_ui_loaded = True
             sess.lazy_history_mtime = 0.0
             sess.lazy_history_preview = ""
             sess.lazy_history_rounds = 0
@@ -3823,7 +3837,6 @@ class GenericAgentTUI(App[None]):
                 sess.sidebar_sort_at = restored_sort_at
             sess.last_activity_at = restored_activity_at or sess.last_activity_at
             sess.sidebar_meta_sig = ()
-            self._remount_current_session()
             self._refresh_all()
         if defer_finish:
             self.call_after_refresh(_finish)
@@ -3833,17 +3846,51 @@ class GenericAgentTUI(App[None]):
 
     def _activate_history_session(self, sess: AgentSession) -> bool:
         path = sess.lazy_history_path
-        if not path or sess.agent is not None:
+        if not path:
             return True
         self._restore_session_from_path(sess, path, defer_finish=False)
-        return sess.agent is not None
+        return sess.agent is not None and not sess.lazy_history_path
+
+    def _load_history_session_ui(self, sess: AgentSession) -> None:
+        path = sess.lazy_history_path
+        if not path or sess.history_ui_loaded:
+            return
+        sess.messages.clear()
+        try:
+            history_size = os.path.getsize(path)
+        except OSError:
+            history_size = 0
+        if history_size >= self._HISTORY_UI_PREVIEW_ONLY_BYTES:
+            size_kb = max(1, history_size // 1024)
+            rounds = f"{sess.lazy_history_rounds} 轮" if sess.lazy_history_rounds else "历史会话"
+            preview = sess.lazy_history_preview or "（无预览）"
+            sess.messages.append(ChatMessage(
+                "system",
+                f"历史会话预览：{rounds} · {size_kb}KB\n\n"
+                f"{preview}\n\n"
+                "为避免切换卡顿，未自动渲染完整历史；直接发送消息会先恢复完整上下文。",
+            ))
+            sess.history_ui_loaded = True
+            return
+        for h in continue_extract(path):
+            sess.messages.append(ChatMessage(
+                role=h["role"],
+                content=h["content"],
+                history_light_render=True,
+            ))
+        if not sess.messages:
+            sess.messages.append(ChatMessage("system", "（无法预览该历史会话）"))
+        sess.history_ui_loaded = True
 
     def _switch_session(self, sid: int) -> bool:
         if sid not in self.sessions:
             return False
+        sess = self.sessions[sid]
+        restoring_lazy_history = bool(sess.lazy_history_path and sess.agent is None)
         self.current_id = sid
-        self._activate_history_session(self.sessions[sid])
         self._last_title = ""
+        if restoring_lazy_history:
+            self._load_history_session_ui(sess)
         self._refresh_all()
         return True
 
@@ -5647,6 +5694,11 @@ class GenericAgentTUI(App[None]):
         # Free-text ask_user answers go through a 2-step submit-confirm card.
         if self._maybe_intercept_free_text(sess, text):
             return -1
+        if sess.lazy_history_path:
+            if not self._activate_history_session(sess):
+                self._system("❌ 历史会话恢复失败，无法继续对话。")
+                return -1
+            sess = self.current
         if sess.status == "running":
             wrapped = self._wrap_user_steer(text)
             if self._inject_intervene(sess, wrapped):
@@ -6124,8 +6176,8 @@ class GenericAgentTUI(App[None]):
     def _refresh_all(self):
         if not self.is_mounted: return
         self._swap_input_for_session()
-        self._refresh_topbar()
         self._refresh_sidebar()
+        self._refresh_topbar()
         self._refresh_messages()
         self._refresh_planbar()
         self._ensure_spinner()
@@ -6168,8 +6220,6 @@ class GenericAgentTUI(App[None]):
         except Exception: model = "?"
         try: effort = getattr(s.agent.llmclient.backend, "reasoning_effort", "") or ""
         except Exception: effort = ""
-        for sess in self.sessions.values():
-            refresh_sidebar_metadata(sess)
         tasks_running = sum(1 for x in self.sessions.values() if _session_is_effectively_running(x))
         # App-wide busy window for the ✦ identity chip.
         if tasks_running > 0:
@@ -6204,13 +6254,22 @@ class GenericAgentTUI(App[None]):
             self._chip_timer = None
         try: term_w = self.size.width
         except Exception: term_w = 0
+        clock_tick = int(now)
+        sig = (
+            self.current_id, s.name, display_status, model, effort, tasks_running,
+            self.fold_mode, self.theme, elapsed, sess_elapsed, just_done, term_w,
+            clock_tick,
+        )
+        self._ensure_title_timer()
+        self._update_terminal_title()
+        if self._topbar_sig == sig:
+            return
+        self._topbar_sig = sig
         self.query_one("#topbar", Static).update(
             render_topbar(s.name, display_status, model, tasks_running,
                           fold_mode=self.fold_mode, busy_elapsed=elapsed, effort=effort,
                           sess_elapsed=sess_elapsed, just_done=just_done,
                           term_width=term_w))
-        self._ensure_title_timer()
-        self._update_terminal_title()
 
     def _term_write(self, data: str) -> None:
         """Emit a raw control sequence to the terminal THROUGH Textual's driver.
@@ -6426,6 +6485,15 @@ class GenericAgentTUI(App[None]):
         fold_idx is the position in fold_turns() output — stable across streaming since
         new turns only append. Last segment carries the streaming suffix."""
         raw = m.content or ""
+        if (m.done and m.history_light_render
+                and len(raw) >= self._HISTORY_LIGHT_RENDER_THRESHOLD):
+            key = ("history-light", len(raw), hash(raw), self.theme)
+            if m._cache_key == key and m._cached_body is not None:
+                return m._cached_body
+            out = [("text", Text.from_ansi(raw, style=C_FG), None)]
+            m._cached_body = out
+            m._cache_key = key
+            return out
         # Cache final renders — Markdown re-parse on every resize is expensive over long history.
         key = (len(raw), m.done, width, self.fold_mode, frozenset(m._toggled_folds))
         if m.done and m._cache_key == key and m._cached_body is not None:
