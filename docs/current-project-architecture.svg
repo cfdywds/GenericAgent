@@ -1,0 +1,357 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="title desc">
+  <title id="title">GenericAgent 当前项目架构图</title>
+  <desc id="desc">深色蓝图风格的 GenericAgent 当前仓库架构图，展示前端入口、核心运行时、模型适配、工具系统、记忆反思、插件观测、风险控制和执行生命周期。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#06101f"/>
+      <stop offset="52%" stop-color="#081827"/>
+      <stop offset="100%" stop-color="#09111c"/>
+    </linearGradient>
+    <linearGradient id="panelFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#112338" stop-opacity=".88"/>
+      <stop offset="100%" stop-color="#0b1728" stop-opacity=".78"/>
+    </linearGradient>
+    <linearGradient id="panelFillStrong" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#123454" stop-opacity=".94"/>
+      <stop offset="100%" stop-color="#0d2235" stop-opacity=".88"/>
+    </linearGradient>
+    <linearGradient id="riskFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3d2b13" stop-opacity=".92"/>
+      <stop offset="100%" stop-color="#172031" stop-opacity=".86"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#24435e" stroke-width="1" opacity=".32"/>
+    </pattern>
+    <pattern id="microGrid" width="8" height="8" patternUnits="userSpaceOnUse">
+      <path d="M 8 0 L 0 0 0 8" fill="none" stroke="#2b516d" stroke-width=".6" opacity=".16"/>
+    </pattern>
+    <filter id="glowCyan" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#22d3ee" flood-opacity=".62"/>
+    </filter>
+    <filter id="glowGreen" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#34d399" flood-opacity=".55"/>
+    </filter>
+    <filter id="glowAmber" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#f59e0b" flood-opacity=".58"/>
+    </filter>
+    <marker id="arrowCyan" markerWidth="15" markerHeight="15" refX="12" refY="7.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L13,7.5 L1,14 Z" fill="#38e8ff"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="15" markerHeight="15" refX="12" refY="7.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L13,7.5 L1,14 Z" fill="#3df29a"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L12,7 L1,13 Z" fill="#fbbf24"/>
+    </marker>
+    <style>
+      text { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Segoe UI", sans-serif; letter-spacing: 0; }
+      .title { font-size: 44px; font-weight: 800; fill: #f2fbff; }
+      .subtitle { font-size: 18px; font-weight: 500; fill: #b8d8f0; }
+      .tiny { font-size: 12px; font-weight: 500; fill: #8fb8d3; }
+      .panelTitle { font-size: 23px; font-weight: 800; fill: #eefbff; }
+      .panelSub { font-size: 14px; font-weight: 600; fill: #9ed2ee; }
+      .label { font-size: 16px; font-weight: 650; fill: #dff7ff; }
+      .small { font-size: 13px; font-weight: 520; fill: #c3dded; }
+      .muted { font-size: 12px; font-weight: 500; fill: #8faabd; }
+      .badgeText { font-size: 14px; font-weight: 900; fill: #04111d; }
+      .chipText { font-size: 12px; font-weight: 750; fill: #c8f7ff; }
+      .riskText { font-size: 13px; font-weight: 650; fill: #ffe3a1; }
+      .panel { fill: url(#panelFill); stroke: #3ea6c5; stroke-width: 1.4; rx: 8; }
+      .panelStrong { fill: url(#panelFillStrong); stroke: #4bdcf5; stroke-width: 1.7; rx: 8; }
+      .riskPanel { fill: url(#riskFill); stroke: #f5b642; stroke-width: 1.5; rx: 8; }
+      .inner { fill: #071522; stroke: #31526b; stroke-width: 1; rx: 6; opacity: .92; }
+      .chip { fill: #0a2132; stroke: #2fc4dd; stroke-width: 1; rx: 5; }
+      .cyanLine { fill: none; stroke: #38e8ff; stroke-width: 3.2; marker-end: url(#arrowCyan); filter: url(#glowCyan); }
+      .greenLine { fill: none; stroke: #3df29a; stroke-width: 3; stroke-dasharray: 9 7; marker-end: url(#arrowGreen); filter: url(#glowGreen); }
+      .amberLine { fill: none; stroke: #fbbf24; stroke-width: 2.7; stroke-dasharray: 7 6; marker-end: url(#arrowAmber); filter: url(#glowAmber); }
+      .guide { fill: none; stroke: #5eb6d4; stroke-width: 1; opacity: .24; }
+      .iconLine { fill: none; stroke: #baf4ff; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+      .iconFill { fill: #0c2738; stroke: #8be8f7; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <rect width="1920" height="1080" fill="url(#grid)"/>
+  <rect width="1920" height="1080" fill="url(#microGrid)"/>
+  <path d="M40 130 H1880 M40 922 H1880 M92 70 V1015 M1760 70 V1015" class="guide"/>
+  <path d="M92 70 h70 M92 70 v70 M1760 70 h70 M1830 70 v70 M92 1015 h70 M92 945 v70 M1760 1015 h70 M1830 945 v70" stroke="#72d9f7" stroke-width="2" opacity=".48" fill="none"/>
+
+  <text x="960" y="66" text-anchor="middle" class="title">GenericAgent 当前项目架构图</text>
+  <text x="960" y="98" text-anchor="middle" class="subtitle">前端多入口收敛到最小自主执行循环；LLM、工具、安全策略、记忆与反思任务通过统一运行时协作。</text>
+  <text x="1550" y="84" class="tiny">来源：当前工作区</text>
+  <text x="1550" y="104" class="tiny">生成日期：2026-06-10</text>
+
+  <!-- Legend -->
+  <g transform="translate(96 107)">
+    <path d="M0 0 H58" class="cyanLine"/>
+    <text x="74" y="5" class="muted">青色：正向数据流</text>
+    <path d="M240 0 H298" class="greenLine"/>
+    <text x="314" y="5" class="muted">绿色：记忆 / 回填 / 反馈</text>
+    <path d="M540 0 H598" class="amberLine"/>
+    <text x="614" y="5" class="muted">琥珀：风险 / 约束</text>
+  </g>
+
+  <!-- Main flow panels -->
+  <g id="main-panels">
+    <g transform="translate(76 160)">
+      <rect width="330" height="604" class="panel"/>
+      <circle cx="34" cy="34" r="20" fill="#38e8ff"/>
+      <text x="34" y="40" text-anchor="middle" class="badgeText">01</text>
+      <text x="66" y="39" class="panelTitle">入口与交互层</text>
+      <text x="66" y="62" class="panelSub">用户请求进入统一任务队列</text>
+      <g transform="translate(24 88)">
+        <rect width="282" height="64" class="inner"/>
+        <path d="M22 18 h34 v25 h-34 z M28 49 h22" class="iconLine"/>
+        <text x="78" y="27" class="label">桌面 / WebView</text>
+        <text x="78" y="49" class="small">launch.pyw，Tauri 静态页</text>
+      </g>
+      <g transform="translate(24 166)">
+        <rect width="282" height="64" class="inner"/>
+        <path d="M24 18 h31 v31 h-31 z M31 28 l8 7 -8 7 M42 43 h12" class="iconLine"/>
+        <text x="78" y="27" class="label">终端界面</text>
+        <text x="78" y="49" class="small">tuiapp_v2.py，tui_v3.py</text>
+      </g>
+      <g transform="translate(24 244)">
+        <rect width="282" height="64" class="inner"/>
+        <path d="M26 18 h28 v33 h-28 z M32 26 h16 M32 34 h16 M32 42 h11" class="iconLine"/>
+        <text x="78" y="27" class="label">Streamlit / Qt</text>
+        <text x="78" y="49" class="small">stapp.py，qtapp.py</text>
+      </g>
+      <g transform="translate(24 322)">
+        <rect width="282" height="64" class="inner"/>
+        <path d="M23 21 h34 v22 h-20 l-9 8 v-8 h-5 z" class="iconLine"/>
+        <text x="78" y="27" class="label">即时通讯前端</text>
+        <text x="78" y="49" class="small">微信，QQ，飞书，钉钉</text>
+      </g>
+      <g transform="translate(24 400)">
+        <rect width="282" height="64" class="inner"/>
+        <path d="M24 21 h34 v28 h-34 z M31 30 h18 M31 39 h10" class="iconLine"/>
+        <text x="78" y="27" class="label">命令行入口</text>
+        <text x="78" y="49" class="small">ga_cli，ga.cmd，启动脚本</text>
+      </g>
+      <g transform="translate(24 490)">
+        <rect width="282" height="70" class="chip"/>
+        <text x="18" y="27" class="chipText">斜杠命令：</text>
+        <text x="18" y="49" class="small">/goal，/hive，/conductor，/resume</text>
+      </g>
+    </g>
+
+    <g transform="translate(450 160)">
+      <rect width="330" height="604" class="panelStrong"/>
+      <circle cx="34" cy="34" r="20" fill="#38e8ff"/>
+      <text x="34" y="40" text-anchor="middle" class="badgeText">02</text>
+      <text x="66" y="39" class="panelTitle">核心运行时</text>
+      <text x="66" y="62" class="panelSub">会话、提示词、模型与任务状态</text>
+      <g transform="translate(24 88)">
+        <rect width="282" height="82" class="inner"/>
+        <path d="M24 22 h36 v36 h-36 z M30 30 h24 M30 40 h24 M30 50 h16" class="iconLine"/>
+        <text x="78" y="29" class="label">GenericAgent</text>
+        <text x="78" y="51" class="small">agentmain.py：任务队列</text>
+        <text x="78" y="70" class="small">会话日志，LLM 切换</text>
+      </g>
+      <g transform="translate(24 188)">
+        <rect width="282" height="82" class="inner"/>
+        <path d="M25 32 c8-18 34-18 42 0 c-8 18-34 18-42 0 z M46 24 v16 M38 32 h16" class="iconLine"/>
+        <text x="78" y="29" class="label">系统提示装配</text>
+        <text x="78" y="51" class="small">sys_prompt + global_mem</text>
+        <text x="78" y="70" class="small">语言环境与工具结构</text>
+      </g>
+      <g transform="translate(24 288)">
+        <rect width="282" height="98" class="inner"/>
+        <path d="M24 32 h40 M44 18 v40 M31 24 l13-13 13 13 M31 52 l13 13 13-13" class="iconLine"/>
+        <text x="78" y="29" class="label">执行循环</text>
+        <text x="78" y="51" class="small">agent_runner_loop</text>
+        <text x="78" y="70" class="small">轮次、工具调用、next_prompt</text>
+        <text x="78" y="89" class="small">StepOutcome 控制退出</text>
+      </g>
+      <g transform="translate(24 404)">
+        <rect width="282" height="78" class="inner"/>
+        <path d="M24 22 h36 v32 h-36 z M30 30 h24 M30 39 h16 M47 50 l12 12" class="iconLine"/>
+        <text x="78" y="29" class="label">工具调度器</text>
+        <text x="78" y="51" class="small">BaseHandler.dispatch</text>
+        <text x="78" y="70" class="small">hooks 前后置事件</text>
+      </g>
+      <g transform="translate(24 510)">
+        <rect width="282" height="50" class="chip"/>
+        <text x="18" y="30" class="small">输出通过队列流式回传给各前端</text>
+      </g>
+    </g>
+
+    <g transform="translate(824 160)">
+      <rect width="330" height="604" class="panel"/>
+      <circle cx="34" cy="34" r="20" fill="#38e8ff"/>
+      <text x="34" y="40" text-anchor="middle" class="badgeText">03</text>
+      <text x="66" y="39" class="panelTitle">模型适配层</text>
+      <text x="66" y="62" class="panelSub">多后端统一为工具调用协议</text>
+      <g transform="translate(24 88)">
+        <rect width="282" height="82" class="inner"/>
+        <path d="M25 26 h34 a12 12 0 0 1 0 24 h-34 a12 12 0 0 1 0-24 z M34 26 v24 M50 26 v24" class="iconLine"/>
+        <text x="78" y="29" class="label">配置加载</text>
+        <text x="78" y="51" class="small">mykey.py / mykey.json</text>
+        <text x="78" y="70" class="small">reload_mykeys 热更新</text>
+      </g>
+      <g transform="translate(24 188)">
+        <rect width="282" height="98" class="inner"/>
+        <path d="M25 54 h38 M44 18 v36 M32 30 h24 M32 42 h24 M32 66 h24" class="iconLine"/>
+        <text x="78" y="29" class="label">会话实现</text>
+        <text x="78" y="51" class="small">Claude / OpenAI 原生</text>
+        <text x="78" y="70" class="small">兼容式 LLMSession</text>
+        <text x="78" y="89" class="small">MixinSession 多模型组合</text>
+      </g>
+      <g transform="translate(24 304)">
+        <rect width="282" height="98" class="inner"/>
+        <path d="M24 25 h38 v38 h-38 z M30 34 h26 M30 44 h26 M30 54 h18" class="iconLine"/>
+        <text x="78" y="29" class="label">上下文控制</text>
+        <text x="78" y="51" class="small">trim_messages_history</text>
+        <text x="78" y="70" class="small">压缩工具结果与思考块</text>
+        <text x="78" y="89" class="small">用量记录与响应缓存</text>
+      </g>
+      <g transform="translate(24 420)">
+        <rect width="282" height="82" class="inner"/>
+        <path d="M27 46 c16-24 23-24 40 0 M31 31 h30 M31 58 h30" class="iconLine"/>
+        <text x="78" y="29" class="label">ToolClient</text>
+        <text x="78" y="51" class="small">解析 tool_calls</text>
+        <text x="78" y="70" class="small">流式 SSE 输出</text>
+      </g>
+      <g transform="translate(24 526)">
+        <rect width="282" height="34" class="chip"/>
+        <text x="18" y="22" class="small">后端选择由 mykey 配置和 /llm 控制</text>
+      </g>
+    </g>
+
+    <g transform="translate(1198 160)">
+      <rect width="330" height="604" class="panel"/>
+      <circle cx="34" cy="34" r="20" fill="#38e8ff"/>
+      <text x="34" y="40" text-anchor="middle" class="badgeText">04</text>
+      <text x="66" y="39" class="panelTitle">工具与系统能力</text>
+      <text x="66" y="62" class="panelSub">九类原子工具驱动本机环境</text>
+      <g transform="translate(24 88)">
+        <rect width="282" height="82" class="inner"/>
+        <path d="M27 20 h33 v33 h-33 z M35 28 h17 M35 38 h17 M28 62 h31" class="iconLine"/>
+        <text x="78" y="29" class="label">文件工具</text>
+        <text x="78" y="51" class="small">file_read / patch / write</text>
+        <text x="78" y="70" class="small">FilePolicy 评估写入风险</text>
+      </g>
+      <g transform="translate(24 188)">
+        <rect width="282" height="82" class="inner"/>
+        <path d="M24 24 h40 v30 h-40 z M31 34 l9 8 -9 8 M45 50 h14" class="iconLine"/>
+        <text x="78" y="29" class="label">代码执行</text>
+        <text x="78" y="51" class="small">code_run：Python / PowerShell</text>
+        <text x="78" y="70" class="small">进程安全扫描与超时</text>
+      </g>
+      <g transform="translate(24 288)">
+        <rect width="282" height="82" class="inner"/>
+        <path d="M24 25 h40 v28 h-40 z M24 25 l20 16 20-16 M64 61 h-40" class="iconLine"/>
+        <text x="78" y="29" class="label">浏览器控制</text>
+        <text x="78" y="51" class="small">web_scan / execute_js</text>
+        <text x="78" y="70" class="small">TMWebDriver 与 CDP 桥</text>
+      </g>
+      <g transform="translate(24 388)">
+        <rect width="282" height="82" class="inner"/>
+        <path d="M31 22 h26 v34 h-26 z M37 30 h14 M37 39 h14 M28 62 h32" class="iconLine"/>
+        <text x="78" y="29" class="label">搜索与人工中断</text>
+        <text x="78" y="51" class="small">web_search，ask_user</text>
+        <text x="78" y="70" class="small">checkpoint，长期记忆更新</text>
+      </g>
+      <g transform="translate(24 506)">
+        <rect width="282" height="54" class="chip"/>
+        <text x="18" y="23" class="small">执行对象：终端、文件系统、浏览器</text>
+        <text x="18" y="42" class="small">键鼠、屏幕视觉、移动设备 SOP</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Side bar -->
+  <g transform="translate(1570 160)">
+    <rect width="274" height="604" class="riskPanel"/>
+    <circle cx="34" cy="34" r="20" fill="#fbbf24"/>
+    <text x="34" y="40" text-anchor="middle" class="badgeText">05</text>
+    <text x="66" y="39" class="panelTitle">记忆、反思与治理</text>
+    <text x="66" y="62" class="panelSub">自治能力与风险控制</text>
+    <g transform="translate(22 88)">
+      <rect width="230" height="68" class="inner"/>
+      <text x="16" y="27" class="label">分层记忆</text>
+      <text x="16" y="49" class="small">global_mem，SOP，L4 归档</text>
+    </g>
+    <g transform="translate(22 172)">
+      <rect width="230" height="86" class="inner"/>
+      <text x="16" y="27" class="label">反思任务</text>
+      <text x="16" y="49" class="small">goal_mode，自主唤醒</text>
+      <text x="16" y="68" class="small">scheduler，agent_team_worker</text>
+    </g>
+    <g transform="translate(22 274)">
+      <rect width="230" height="68" class="inner"/>
+      <text x="16" y="27" class="label">插件钩子</text>
+      <text x="16" y="49" class="small">hooks，Langfuse 追踪</text>
+    </g>
+    <g transform="translate(22 374)">
+      <rect width="230" height="164" class="riskPanel"/>
+      <text x="16" y="29" class="label">关键约束</text>
+      <text x="16" y="58" class="riskText">密钥文件禁止直接触碰</text>
+      <text x="16" y="84" class="riskText">删除动作进入隔离区</text>
+      <text x="16" y="110" class="riskText">核心文件整写需确认</text>
+      <text x="16" y="136" class="riskText">浏览器桥依赖本机环境</text>
+    </g>
+    <g transform="translate(22 558)">
+      <rect width="230" height="30" class="chip"/>
+      <text x="16" y="20" class="small">运行产物：temp / model_responses</text>
+    </g>
+  </g>
+
+  <!-- Arrows -->
+  <path d="M406 462 H450" class="cyanLine"/>
+  <path d="M780 462 H824" class="cyanLine"/>
+  <path d="M1154 462 H1198" class="cyanLine"/>
+  <path d="M1528 462 H1570" class="cyanLine"/>
+  <path d="M1363 764 C1363 832 612 832 612 764" class="greenLine"/>
+  <path d="M963 764 C963 878 1705 878 1705 764" class="greenLine"/>
+  <path d="M1710 536 C1660 520 1570 512 1528 512" class="amberLine"/>
+
+  <!-- Data bands -->
+  <g transform="translate(76 790)">
+    <rect width="1452" height="104" class="panel"/>
+    <text x="24" y="34" class="panelTitle">横向数据流</text>
+    <text x="24" y="64" class="small">请求文本 / 图片 / 命令 → 系统提示与全局记忆 → LLM 推理与工具调用 → 本机执行结果 → 下一轮提示 → 用户侧流式输出</text>
+    <text x="24" y="87" class="small">工具 schema 来自 assets/tools_schema.json；中文后端可切换 tools_schema_cn.json。</text>
+  </g>
+  <g transform="translate(1570 790)">
+    <rect width="274" height="104" class="riskPanel"/>
+    <text x="18" y="34" class="label">观测面</text>
+    <text x="18" y="60" class="small">会话元数据、成本追踪</text>
+    <text x="18" y="82" class="small">日志、审计、插件事件</text>
+  </g>
+
+  <!-- Lifecycle -->
+  <g transform="translate(76 930)">
+    <rect width="1768" height="94" class="panelStrong"/>
+    <text x="24" y="36" class="panelTitle">执行生命周期</text>
+    <g transform="translate(260 22)">
+      <circle cx="0" cy="20" r="8" fill="#38e8ff"/>
+      <text x="-34" y="54" class="small">请求进入</text>
+      <path d="M12 20 H142" class="cyanLine"/>
+      <circle cx="154" cy="20" r="8" fill="#38e8ff"/>
+      <text x="114" y="54" class="small">命令预处理</text>
+      <path d="M166 20 H296" class="cyanLine"/>
+      <circle cx="308" cy="20" r="8" fill="#38e8ff"/>
+      <text x="260" y="54" class="small">上下文装配</text>
+      <path d="M320 20 H450" class="cyanLine"/>
+      <circle cx="462" cy="20" r="8" fill="#38e8ff"/>
+      <text x="424" y="54" class="small">流式推理</text>
+      <path d="M474 20 H604" class="cyanLine"/>
+      <circle cx="616" cy="20" r="8" fill="#38e8ff"/>
+      <text x="576" y="54" class="small">工具分发</text>
+      <path d="M628 20 H758" class="cyanLine"/>
+      <circle cx="770" cy="20" r="8" fill="#38e8ff"/>
+      <text x="724" y="54" class="small">系统执行</text>
+      <path d="M782 20 H912" class="cyanLine"/>
+      <circle cx="924" cy="20" r="8" fill="#38e8ff"/>
+      <text x="878" y="54" class="small">结果回填</text>
+      <path d="M936 20 H1066" class="cyanLine"/>
+      <circle cx="1078" cy="20" r="8" fill="#38e8ff"/>
+      <text x="1032" y="54" class="small">日志持久化</text>
+      <path d="M1090 20 H1220" class="cyanLine"/>
+      <circle cx="1232" cy="20" r="8" fill="#38e8ff"/>
+      <text x="1188" y="54" class="small">资源清理</text>
+    </g>
+  </g>
+</svg>
