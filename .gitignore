@@ -148,3 +148,5 @@ frontends/conductor_im_plugins/config.local.json
 
 .claude/
 .worktrees/
+# Project Mode SOP
+!memory/project_mode_sop.md
