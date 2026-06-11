@@ -4,8 +4,11 @@ from urllib.parse import quote
 import requests, qrcode
 from Crypto.Cipher import AES
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'temp')
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TEMP_DIR = os.path.join(_ROOT_DIR, 'temp')
+_STATE_FILE = os.path.join(_TEMP_DIR, 'wechatapp_state.json')
 from agentmain import GeneraticAgent
+from llmcore import reload_mykeys
 
 # ── AuthExpired (errcode -14 from getUpdates) ──
 class AuthExpired(Exception):
@@ -310,6 +313,159 @@ def _clean(t):
     t = re.sub(r'</?summary>', '', t)
     return re.sub(r'\n{3,}', '\n\n', _strip_md(t)).strip()
 
+def _load_state():
+    try:
+        with open(_STATE_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_state(**kw):
+    os.makedirs(_TEMP_DIR, exist_ok=True)
+    data = _load_state()
+    data.update({k: v for k, v in kw.items() if v is not None})
+    with open(_STATE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return data
+
+def _remember_user(uid, ctx=''):
+    if not uid: return
+    _save_state(last_user_id=uid, last_context_token=ctx or '',
+                last_seen_at=time.strftime('%Y-%m-%d %H:%M:%S'))
+
+def _scheduler_target(cli_target=''):
+    try: cfg = reload_mykeys()[0]
+    except Exception: cfg = {}
+    state = _load_state()
+    uid = (cli_target or cfg.get('wechat_scheduler_user_id') or
+           cfg.get('wechat_push_user_id') or state.get('scheduler_user_id') or
+           state.get('last_user_id') or '')
+    ctx = cfg.get('wechat_scheduler_context_token') or state.get('scheduler_context_token') or ''
+    return str(uid).strip(), str(ctx).strip()
+
+def _send_text_chunks(bot, uid, text, context_token='', limit=3000, max_chunks=12):
+    text = (text or '').strip()
+    if not uid or not text: return 0
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text); break
+        cut = text.rfind('\n', 0, limit)
+        if cut < limit // 2: cut = limit
+        chunks.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if len(chunks) > max_chunks:
+        chunks = chunks[:max_chunks]
+        chunks[-1] = chunks[-1].rstrip() + '\n\n[内容过长，已截断；完整报告见本地报告文件]'
+    for chunk in chunks:
+        bot.send_text(uid, chunk, context_token=context_token)
+        time.sleep(0.5)
+    return len(chunks)
+
+def _read_file_if_exists(path):
+    if not path or not os.path.isfile(path): return ''
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except Exception as e:
+        print(f'[WX Subscriber] read file error: {type(e).__name__}: {e}', file=sys.__stdout__)
+        return ''
+
+class WeChatTaskSubscriber:
+    """微信定时任务通知订阅者。"""
+    def __init__(self, bot):
+        self.bot = bot
+        self.event_file = os.path.join(_TEMP_DIR, 'scheduler_notifications', 'events.jsonl')
+        self.offset_file = os.path.join(_TEMP_DIR, '.wechat_subscriber_offset')
+        self.offset = 0
+        self._load_offset()
+
+    def _load_offset(self):
+        try:
+            with open(self.offset_file, encoding='utf-8') as f:
+                self.offset = int(f.read().strip() or '0')
+        except Exception:
+            self.offset = 0
+
+    def _save_offset(self):
+        os.makedirs(os.path.dirname(self.offset_file), exist_ok=True)
+        with open(self.offset_file, 'w', encoding='utf-8') as f:
+            f.write(str(self.offset))
+
+    def poll_events(self):
+        if not os.path.exists(self.event_file):
+            return []
+        events = []
+        size = os.path.getsize(self.event_file)
+        if self.offset > size:
+            self.offset = 0
+        try:
+            with open(self.event_file, encoding='utf-8') as f:
+                f.seek(self.offset)
+                new_offset = self.offset
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    if not line.endswith('\n'):
+                        break
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        new_offset = f.tell()
+                        continue
+                    if self.should_handle(event):
+                        events.append(event)
+                    new_offset = f.tell()
+                self.offset = new_offset
+        except Exception as e:
+            print(f'[WX Subscriber] poll error: {type(e).__name__}: {e}', file=sys.__stdout__)
+        self._save_offset()
+        return events
+
+    def should_handle(self, event):
+        return event.get('event_type') in ('task_completed', 'task_failed')
+
+    def handle_event(self, event):
+        uid, ctx = _scheduler_target()
+        tid = event.get('task_id', 'scheduled_task')
+        if not uid:
+            print(f'[WX Subscriber] no push target for {tid}; send /sched_target or set wechat_scheduler_user_id',
+                  file=sys.__stdout__)
+            return
+
+        result = event.get('result') or {}
+        if event.get('event_type') == 'task_completed':
+            report_path = result.get('report_path', '')
+            report = _read_file_if_exists(report_path)
+            body = report.strip() or f'(报告为空或不可读: {report_path})'
+            msg = f'[定时任务] {tid}\n[状态] 完成\n\n{body}'
+        else:
+            error = (result.get('error') or '(无错误信息)').strip()
+            msg = f'[定时任务] {tid}\n[状态] 失败\n\n{_clean(error) or error}'
+
+        try:
+            _send_text_chunks(self.bot, uid, msg, context_token=ctx)
+            print(f'[WX Subscriber] pushed {tid} to {uid}', file=sys.__stdout__)
+        except Exception as e:
+            print(f'[WX Subscriber] push failed {tid}: {type(e).__name__}: {e}', file=sys.__stdout__)
+
+    def start(self):
+        def _loop():
+            print('[WX Subscriber] started', file=sys.__stdout__)
+            while True:
+                try:
+                    for event in self.poll_events():
+                        try:
+                            self.handle_event(event)
+                        except Exception as e:
+                            print(f'[WX Subscriber] handle error: {type(e).__name__}: {e}', file=sys.__stdout__)
+                    time.sleep(10)
+                except Exception as e:
+                    print(f'[WX Subscriber] loop error: {type(e).__name__}: {e}', file=sys.__stdout__)
+                    time.sleep(30)
+        threading.Thread(target=_loop, daemon=True).start()
+
 def on_message(bot, msg):
     text = bot.extract_text(msg).strip()
     uid = msg.get('from_user_id', '')
@@ -319,12 +475,18 @@ def on_message(bot, msg):
     if media_paths:
         text = (text + '\n' if text else '') + '\n'.join(f'[用户发送文件: {p}]' for p in media_paths)
     print(f'[WX] 收到: {text[:80]}', file=sys.__stdout__)
+    _remember_user(uid, ctx)
 
     # Commands
     if text in ('/stop', '/abort'):
         agent.abort()
         _task_aborted[uid] = True
         print(f'[WX] /stop set _task_aborted[{uid}]', file=sys.__stdout__)
+        return
+    if text in ('/sched_target', '/scheduler_target'):
+        _save_state(scheduler_user_id=uid, scheduler_context_token=ctx or '',
+                    scheduler_target_set_at=time.strftime('%Y-%m-%d %H:%M:%S'))
+        bot.send_text(uid, '已设为定时任务推送接收人。', context_token=ctx)
         return
     if text.startswith('/llm'):
         args = text.split()
@@ -407,20 +569,35 @@ def on_message(bot, msg):
     threading.Thread(target=_handle, daemon=True).start()
 
 if __name__ == '__main__':
-    _do_relogin = '--relogin' in sys.argv
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--relogin', action='store_true')
+    parser.add_argument('--llm_no', type=int)
+    parser.add_argument('--sched-target', '--scheduler-target', dest='sched_target', default='')
+    args, _unknown = parser.parse_known_args()
     try: _lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM); _lock.bind(('127.0.0.1', 19531))
     except OSError: print('[WeChat] Another instance running, exiting.'); sys.exit(1)
     _logf = open(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'temp', 'wechatapp.log'), 'a', encoding='utf-8', buffering=1)
     sys.stdout = sys.stderr = _logf
     print(f'[NEW] Process starting {time.strftime("%m-%d %H:%M")}')
     bot = WxBotClient()
-    if _do_relogin or not bot.token:
+    if args.relogin or not bot.token:
         if not sys.stdout.isatty():
             print('[Bot] no token and not interactive, exit.'); sys.exit(1)
         sys.stdout = sys.stderr = sys.__stdout__  # restore for QR display
         bot.login_qr()
         sys.stdout = sys.stderr = _logf
+    if args.llm_no is not None:
+        try:
+            agent.next_llm(args.llm_no)
+            print(f'[WX] llm_no={agent.llm_no} {agent.get_llm_name()}')
+        except Exception as e:
+            print(f'[WX] set llm_no failed: {e}')
+    if args.sched_target:
+        _save_state(scheduler_user_id=args.sched_target,
+                    scheduler_target_set_at=time.strftime('%Y-%m-%d %H:%M:%S'))
     threading.Thread(target=agent.run, daemon=True).start()
+    WeChatTaskSubscriber(bot).start()
     print(f'WeChat Bot 已启动 (bot_id={bot.bot_id})', file=sys.__stdout__)
     try:
         bot.run_loop(on_message)

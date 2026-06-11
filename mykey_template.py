@@ -422,6 +422,7 @@ native_oai_config = {
 # fs_app_id = 'cli_xxxxxxxxxxxxxxxx'
 # fs_app_secret = 'xxxxxxxxxxxxxxxx'
 # fs_allowed_users = ['ou_xxxxxxxxxxxxxxxx']        # 留空或 ['*'] 表示允许所有飞书用户
+# wechat_scheduler_user_id = 'your_wechat_user_id'  # 可选：微信定时任务主动推送目标；也可在微信里发送 /sched_target 设置
 # wecom_bot_id = 'your_bot_id'
 # wecom_secret = 'your_bot_secret'
 # wecom_allowed_users = ['your_user_id']            # 留空或 ['*'] 表示允许所有企业微信用户

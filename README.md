@@ -209,6 +209,24 @@ GenericAgent also supports IM frontends such as Telegram, Discord, and Lark.
 > WeChat, QQ, WeCom and DingTalk are also supported — see the Chinese section below.
 > For detailed setup, ask GenericAgent itself.
 
+#### WeChat Scheduled Task Push
+
+Scheduled tasks run as an independent reflect process. The WeChat bot only subscribes to scheduler events and pushes completed/failed reports.
+
+```bash
+# Start Streamlit UI, WeChat bot, and scheduler together
+python launch.pyw --wechat --sched --llm_no 4
+
+# If WeChat bot is already running, start only the scheduler
+python agentmain.py --reflect reflect/scheduler.py --llm_no 4
+
+# Run without the desktop UI: start both processes separately
+python frontends/wechatapp.py --llm_no 4
+python agentmain.py --reflect reflect/scheduler.py --llm_no 4
+```
+
+`--llm_no N` selects the N-th configured LLM backend with zero-based indexing. Omit it to use `0`. Send `/sched_target` to the WeChat bot once, or set `wechat_scheduler_user_id` in `mykey.py`, to choose the push recipient.
+
 ### Common Chat Commands
 
 | Command | Description |
@@ -623,6 +641,24 @@ GenericAgent 支持 Telegram、Discord、微信、QQ、飞书 / Lark、企业微
 | 钉钉 | `python frontends/dingtalkapp.py` |
 
 > 详细配置直接问 GenericAgent。
+
+#### 微信定时任务推送
+
+定时任务现在独立于微信 Bot 运行：scheduler 负责执行 `sche_tasks/*.json` 并发布事件，微信 Bot 只订阅事件并推送完成 / 失败报告。
+
+```powershell
+# 同时启动桌面端、微信 Bot、定时任务
+python "launch.pyw" --wechat --sched --llm_no 4
+
+# 如果微信 Bot 已经在运行，只单独启动定时任务
+python "agentmain.py" --reflect "reflect/scheduler.py" --llm_no 4
+
+# 不启动桌面端，两个后台进程分开运行
+python "frontends/wechatapp.py" --llm_no 4
+python "agentmain.py" --reflect "reflect/scheduler.py" --llm_no 4
+```
+
+`--llm_no N` 表示选择第 `N + 1` 个可用 LLM 配置，编号从 `0` 开始；例如 `--llm_no 4` 是第 5 个模型配置。不传时默认使用 `0`。首次推送前，在微信里给 Bot 发送 `/sched_target`，或在 `mykey.py` 中配置 `wechat_scheduler_user_id`。
 
 ### 通用聊天命令
 
