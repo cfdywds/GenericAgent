@@ -510,6 +510,11 @@ def on_message(bot, msg):
                     scheduler_target_set_at=time.strftime('%Y-%m-%d %H:%M:%S'))
         bot.send_text(uid, '已设为定时任务推送接收人。', context_token=ctx)
         return
+    if text in ('/sched_target', '/scheduler_target'):
+        _save_state(scheduler_user_id=uid, scheduler_context_token=ctx or '',
+                    scheduler_target_set_at=time.strftime('%Y-%m-%d %H:%M:%S'))
+        bot.send_text(uid, '已设为定时任务推送接收人。', context_token=ctx)
+        return
     if text.startswith('/llm'):
         args = text.split()
         if len(args) > 1:
@@ -604,10 +609,9 @@ if __name__ == '__main__':
     print(f'[NEW] Process starting {time.strftime("%m-%d %H:%M")}')
     bot = WxBotClient()
     _do_relogin = '--relogin' in sys.argv
-    if _do_relogin or not bot.token:
+    if args.relogin or not bot.token:
         # QR 登录在无 TTY 的容器里也可用：把二维码打到真实 stdout（docker logs
-        # 可见），而不是日志文件——之前在重定向后才判 isatty()，文件句柄恒 false
-        # 导致容器内必然退出，无法首次登录。PNG 仍存 ~/.wxbot/wx_qr.png 作兜底。
+        # 可见），而不是日志文件。PNG 仍存 ~/.wxbot/wx_qr.png 作兜底。
         sys.stdout = sys.stderr = sys.__stdout__  # restore for QR display (real stdout / container log)
         try:
             bot.login_qr()
