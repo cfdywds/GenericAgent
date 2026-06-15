@@ -397,9 +397,9 @@ def file_read(path, start=1, keyword=None, count=200, show_linenos=True):
     except FileNotFoundError:
         msg = f"Error: File not found: {path}"
         try:
-            tgt = os.path.basename(path); scan = os.path.dirname(os.path.dirname(os.path.abspath(path)))
-            roots = [scan] + [d for d in _read_dirs if not d.startswith(scan)]
-            cands = list(itertools.islice((c for base in roots for c in _scan_files(base)), 2000))
+            tgt = os.path.basename(path); parent = os.path.dirname(os.path.abspath(path)); scan = os.path.dirname(parent)
+            roots = [parent, scan] + [d for d in _read_dirs if not d.startswith(scan)]
+            cands = list(dict.fromkeys(itertools.islice((c for base in roots for c in _scan_files(base)), 2000)))
             top = sorted([(difflib.SequenceMatcher(None, tgt.lower(), c[0].lower()).ratio(), c) for c in cands[:2000]], key=lambda x: -x[0])[:5]
             top = [(s, c) for s, c in top if s > 0.3]
             if top: msg += "\n\nDid you mean:\n" + "\n".join(f"  {c[1]}  ({s:.0%})" for s, c in top)
@@ -911,7 +911,7 @@ class GenericAgentHandler(BaseHandler):
         if turn % 75 == 0 and (not _plan):
             next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。必须总结情况进行ask_user，不允许继续重试。"
         elif turn % 7 == 0:
-            next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。禁止无效重试。若无有效进展，必须切换策略：1. 探测物理边界 2. 请求用户协助。如有需要，可调用 update_working_checkpoint 保存关键上下文。"
+            next_prompt += f"\n\n[SYSTEM] 已连续执行第 {turn} 轮。建议调用update_working_checkpoint保存关键上下文。禁止无效重试；若无有效进展，必须切换策略：1. 探测物理边界 2. **重读相关SOP**"
         elif turn % 10 == 0: next_prompt += get_global_memory()
 
         if _plan and turn >= 10 and turn % 5 == 0:
