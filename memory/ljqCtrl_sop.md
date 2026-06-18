@@ -35,10 +35,14 @@ ljqCtrl.Click(ox + (bbox[0] + bbox[2]) // 2, oy + (bbox[1] + bbox[3]) // 2)
 ```
 禁止全屏 ImageGrab；必须针对窗口截图。所有逻辑坐标都要转物理。
 
+**macOS (`macljqCtrl`)**：`GrabScreen(bbox)` 区域截图后，图内点转屏幕物理坐标用 `CropToScreen(bbox, px, py)`，别手搓 `screencapture -R`（它吃逻辑点，会点歪）。
+
 ## 4. 避坑指南
+- **一律使用物理坐标**：传给 `ljqCtrl.Click/SetCursorPos` 的坐标必须是物理坐标（=截图像素坐标）。禁止传入逻辑坐标。
+- **坐标对齐**：截图内坐标已经是物理坐标；只换算来自窗口 API 的逻辑坐标，禁止对截图 bbox 重复 `/ dpi_scale`。
 - **窗口激活**：模拟操作前必须确保窗口已通过 `activate()` 置于前台。
-- **客户区原点**：截图内容是客户区；点击截图内元素时，用 `win32gui.ClientToScreen(hwnd, (0, 0))` 取客户区屏幕原点，禁止直接用 `GetWindowRect` 或 `DwmGetWindowAttribute(hwnd, 9, ...)` 的窗口矩形左上角。
-- **点击反馈**：`ljqCtrl.Click` 后若像素变化为 0% 或接近 0%，说明可能点歪；立即检查窗口原点、`dpi_scale`、客户区/窗口矩形混用，禁止盲目重试。
+- **客户区原点**：截图内容是客户区；点击截图内元素时，用 `win32gui.ClientToScreen(hwnd, (0, 0))` 取客户区屏幕原点，再加截图内坐标。禁止直接用 `GetWindowRect` 或 `DwmGetWindowAttribute(hwnd, 9, ...)` 的窗口矩形左上角，它们包含标题栏、边框或阴影。
+- **点击反馈**：`ljqCtrl.Click` 后若像素变化为 0% 或接近 0%，说明可能点歪；立即检查窗口原点、`dpi_scale`、客户区/窗口矩形混用，禁止盲目重试。macOS 上多为忘加裁剪原点，应走 `CropToScreen`。
 - **DPI aware**：未调用 `SetProcessDPIAware()` 时，`GetWindowRect/ClientToScreen/GetClientRect` 通常返回逻辑坐标，必须换算。
 - **文本输入**：ljqCtrl 无 TypeText/SendKeys。先点击/三击选中字段，再 `pyperclip.copy(text); ljqCtrl.Press('ctrl+v')`。
 - **Java/Swing 截图**：PyCharm/IntelliJ 等可能让 `GrabWindow*` 抓到桌面壁纸；改用 `PrintWindow(PW_RENDERFULLCONTENT=2)`。详见 `memory/ljqCtrl_cases.md#java-swing-printwindow`。
