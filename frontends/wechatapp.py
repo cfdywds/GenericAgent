@@ -7,6 +7,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TEMP_DIR = os.path.join(_ROOT_DIR, 'temp')
 _STATE_FILE = os.path.join(_TEMP_DIR, 'wechatapp_state.json')
+_SCHED_RENDER_DIR = os.path.join(_TEMP_DIR, 'scheduler_notifications', 'rendered')
+_SCHED_TEXT_ONLY_LIMIT = int(os.environ.get('WX_SCHED_TEXT_ONLY_LIMIT', '1200'))
+_SCHED_SUMMARY_LIMIT = int(os.environ.get('WX_SCHED_SUMMARY_LIMIT', '900'))
+_SCHED_IMAGE_MAX_PAGES = int(os.environ.get('WX_SCHED_IMAGE_MAX_PAGES', '6'))
 from agentmain import GeneraticAgent
 from llmcore import reload_mykeys
 
@@ -384,6 +388,135 @@ def _send_text_chunks(bot, uid, text, context_token='', limit=3000, max_chunks=1
         time.sleep(0.5)
     return len(chunks)
 
+def _font_candidates():
+    if os.name == 'nt':
+        windir = os.environ.get('WINDIR', r'C:\\Windows')
+        return [
+            os.path.join(windir, 'Fonts', 'msyh.ttc'),
+            os.path.join(windir, 'Fonts', 'simhei.ttf'),
+            os.path.join(windir, 'Fonts', 'simsun.ttc'),
+        ]
+    return [
+        '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+    ]
+
+
+def _load_render_font(size=26):
+    try:
+        from PIL import ImageFont
+        for fp in _font_candidates():
+            if fp and os.path.isfile(fp):
+                return ImageFont.truetype(fp, size=size)
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _text_width(draw, text, font):
+    try:
+        box = draw.textbbox((0, 0), text, font=font)
+        return box[2] - box[0]
+    except Exception:
+        return len(text) * 14
+
+
+def _wrap_for_image(text, draw, font, max_width):
+    wrapped = []
+    for raw in (text or '').replace('\t', '    ').splitlines():
+        line = raw.rstrip()
+        if not line:
+            wrapped.append('')
+            continue
+        cur = ''
+        for ch in line:
+            trial = cur + ch
+            if cur and _text_width(draw, trial, font) > max_width:
+                wrapped.append(cur)
+                cur = ch
+            else:
+                cur = trial
+        wrapped.append(cur)
+    return wrapped
+
+
+def _render_text_images(text, prefix='scheduled_task'):
+    """Render scheduler report text into one or more PNG screenshots."""
+    try:
+        from PIL import Image, ImageDraw
+    except Exception as e:
+        print(f'[WX Subscriber] PIL unavailable for render: {type(e).__name__}: {e}', file=sys.__stdout__)
+        return []
+
+    os.makedirs(_SCHED_RENDER_DIR, exist_ok=True)
+    safe = re.sub(r'[^0-9A-Za-z_.-]+', '_', prefix or 'scheduled_task')[:80]
+    stamp = time.strftime('%Y%m%d_%H%M%S')
+    width, max_height = 1080, 2200
+    margin_x, margin_y = 56, 50
+    bg, fg = (255, 255, 255), (28, 32, 36)
+    font = _load_render_font(26)
+    title_font = _load_render_font(32)
+    probe = Image.new('RGB', (width, 200), bg)
+    draw = ImageDraw.Draw(probe)
+    max_text_width = width - margin_x * 2
+    lines = _wrap_for_image(text, draw, font, max_text_width)
+    line_h = 38
+    header_h = 18
+    lines_per_page = max(10, (max_height - margin_y * 2 - header_h) // line_h)
+    paths = []
+    total_pages = max(1, math.ceil(len(lines) / lines_per_page))
+    total_pages = min(total_pages, _SCHED_IMAGE_MAX_PAGES)
+    for page in range(total_pages):
+        page_lines = lines[page * lines_per_page:(page + 1) * lines_per_page]
+        truncated = page == total_pages - 1 and (page + 1) * lines_per_page < len(lines)
+        if truncated and len(page_lines) >= 2:
+            page_lines = page_lines[:-2] + ['', '[内容过长，图片已截断；完整报告见本地报告文件]']
+        height = min(max_height, margin_y * 2 + header_h + max(1, len(page_lines)) * line_h + 20)
+        img = Image.new('RGB', (width, height), bg)
+        d = ImageDraw.Draw(img)
+        d.text((margin_x, 18), f'定时任务报告截图 {page + 1}/{total_pages}', fill=(90, 96, 104), font=title_font)
+        y = margin_y + header_h
+        for line in page_lines:
+            d.text((margin_x, y), line, fill=fg, font=font)
+            y += line_h
+        out = os.path.join(_SCHED_RENDER_DIR, f'{stamp}_{safe}_{page + 1}.png')
+        img.save(out, 'PNG', optimize=True)
+        paths.append(out)
+    return paths
+
+
+def _summarize_for_sched_push(tid, report_path, body):
+    text = (body or '').strip()
+    head = text[:_SCHED_SUMMARY_LIMIT].rstrip()
+    if len(text) > _SCHED_SUMMARY_LIMIT:
+        head += '\n\n[报告较长，完整内容见随后截图或本地报告文件]'
+    return f'[定时任务] {tid}\n[状态] 完成\n[报告路径] {report_path or ""}\n[推送模式] 智能：短报告文字，长报告摘要+截图\n\n{head}'
+
+
+def _push_completed_smart(bot, uid, ctx, tid, report_path, body):
+    body = (body or '').strip()
+    full_msg = f'[定时任务] {tid}\n[状态] 完成\n\n{body}'
+    if len(full_msg) <= _SCHED_TEXT_ONLY_LIMIT:
+        return _send_text_chunks(bot, uid, full_msg, context_token=ctx)
+
+    sent = _send_text_chunks(bot, uid, _summarize_for_sched_push(tid, report_path, body), context_token=ctx, max_chunks=2)
+    image_text = f'[定时任务] {tid}\n[状态] 完成\n[报告路径] {report_path or ""}\n\n{body}'
+    image_paths = _render_text_images(image_text, prefix=tid)
+    if not image_paths:
+        sent += _send_text_chunks(bot, uid, full_msg, context_token=ctx)
+        return sent
+    try:
+        for img in image_paths:
+            bot.send_image(uid, img, context_token=ctx)
+            sent += 1
+            time.sleep(0.8)
+    except Exception as e:
+        print(f'[WX Subscriber] image push failed, fallback text: {type(e).__name__}: {e}', file=sys.__stdout__)
+        sent += _send_text_chunks(bot, uid, full_msg, context_token=ctx)
+    return sent
+
+
 def _read_file_if_exists(path):
     if not path or not os.path.isfile(path): return ''
     try:
@@ -457,18 +590,17 @@ class WeChatTaskSubscriber:
             return
 
         result = event.get('result') or {}
-        if event.get('event_type') == 'task_completed':
-            report_path = result.get('report_path', '')
-            report = _read_file_if_exists(report_path)
-            body = report.strip() or f'(报告为空或不可读: {report_path})'
-            msg = f'[定时任务] {tid}\n[状态] 完成\n\n{body}'
-        else:
-            error = (result.get('error') or '(无错误信息)').strip()
-            msg = f'[定时任务] {tid}\n[状态] 失败\n\n{_clean(error) or error}'
-
         try:
-            _send_text_chunks(self.bot, uid, msg, context_token=ctx)
-            print(f'[WX Subscriber] pushed {tid} to {uid}', file=sys.__stdout__)
+            if event.get('event_type') == 'task_completed':
+                report_path = result.get('report_path', '')
+                report = _read_file_if_exists(report_path)
+                body = report.strip() or f'(报告为空或不可读: {report_path})'
+                sent = _push_completed_smart(self.bot, uid, ctx, tid, report_path, body)
+            else:
+                error = (result.get('error') or '(无错误信息)').strip()
+                msg = f'[定时任务] {tid}\n[状态] 失败\n\n{_clean(error) or error}'
+                sent = _send_text_chunks(self.bot, uid, msg, context_token=ctx)
+            print(f'[WX Subscriber] pushed {tid} to {uid} parts={sent}', file=sys.__stdout__)
         except Exception as e:
             print(f'[WX Subscriber] push failed {tid}: {type(e).__name__}: {e}', file=sys.__stdout__)
 
@@ -504,11 +636,6 @@ def on_message(bot, msg):
         agent.abort()
         _task_aborted[uid] = True
         print(f'[WX] /stop set _task_aborted[{uid}]', file=sys.__stdout__)
-        return
-    if text in ('/sched_target', '/scheduler_target'):
-        _save_state(scheduler_user_id=uid, scheduler_context_token=ctx or '',
-                    scheduler_target_set_at=time.strftime('%Y-%m-%d %H:%M:%S'))
-        bot.send_text(uid, '已设为定时任务推送接收人。', context_token=ctx)
         return
     if text in ('/sched_target', '/scheduler_target'):
         _save_state(scheduler_user_id=uid, scheduler_context_token=ctx or '',

@@ -9,6 +9,7 @@ TASKS = os.path.abspath(os.path.join(_dir, '../sche_tasks'))
 DONE = os.path.abspath(os.path.join(_dir, '../sche_tasks/done'))
 _LOG = os.path.abspath(os.path.join(_dir, '../sche_tasks/scheduler.log'))
 _ATTEMPT_FILE = os.path.abspath(os.path.join(_dir, '../sche_tasks/.last_attempt.json'))
+_CURRENT_TASK_FILE = os.path.abspath(os.path.join(_dir, '../sche_tasks/.current_task.json'))
 _NOTIFICATION_DIR = os.path.abspath(os.path.join(_dir, '../temp/scheduler_notifications'))
 _NOTIFICATION_FILE = os.path.join(_NOTIFICATION_DIR, 'events.jsonl')
 
@@ -38,7 +39,10 @@ except NameError:
 DEFAULT_MAX_DELAY = 6
 DEFAULT_RETRY_COOLDOWN_MINUTES = 60
 _l4_t = 0  # last L4 archive time
-_current_task = None
+try:
+    _current_task
+except NameError:
+    _current_task = None
 
 
 def _atomic_write_json(path, data):
@@ -64,6 +68,31 @@ def _save_attempt(tid, timestamp):
     attempts[tid] = timestamp
     _atomic_write_json(_ATTEMPT_FILE, {k: v.isoformat() for k, v in attempts.items()})
     _logger.info(f'PERSIST attempt {tid} at {timestamp.isoformat()}')
+
+
+def _save_current_task(task_meta):
+    # 持久化正在执行的任务，避免 agentmain 热重载本模块后丢失内存态。
+    _atomic_write_json(_CURRENT_TASK_FILE, task_meta)
+
+
+def _load_current_task():
+    try:
+        with open(_CURRENT_TASK_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get('task_id') and data.get('report_path'):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        pass
+    return None
+
+
+def _clear_current_task():
+    try:
+        os.remove(_CURRENT_TASK_FILE)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        _logger.warning(f'clear current task failed: {e}')
 
 
 def _cleanup_old_attempts(max_age_days=7):
@@ -218,6 +247,7 @@ def check():
             'started_monotonic': _time.monotonic(),
         }
         _current_task = task_meta
+        _save_current_task(task_meta)
 
         _logger.info(f'TRIGGER {tid} (repeat={repeat}, schedule={sched}, '
                      f'last_run={last}, last_attempt={last_attempt})')
@@ -237,13 +267,32 @@ def check():
     return None
 
 
+def health_check():
+    """Return scheduler health snapshot for diagnostics and SOP checks."""
+    task = _current_task or _load_current_task()
+    return {
+        'ok': True,
+        'pid': os.getpid(),
+        'tasks_dir': TASKS,
+        'done_dir': DONE,
+        'notification_file': _NOTIFICATION_FILE,
+        'attempt_file': _ATTEMPT_FILE,
+        'current_task_file': _CURRENT_TASK_FILE,
+        'has_current_task': bool(task),
+        'current_task_id': task.get('task_id') if task else None,
+        'interval_seconds': INTERVAL,
+    }
+
+
 def on_done(result_text):
     """agentmain --reflect 在任务结束后调用。"""
     global _current_task
-    task = _current_task
+    task = _current_task or _load_current_task()
     if not task:
         _logger.warning('on_done: no current task metadata')
         return
+    if _current_task is None:
+        _logger.info(f"on_done: recovered current task metadata from {_CURRENT_TASK_FILE}")
 
     tid = task['task_id']
     report_path = task['report_path']
@@ -266,3 +315,4 @@ def on_done(result_text):
     })
     _logger.info(f'{event_type.upper()} {tid} success={success} report={report_path} size={size}')
     _current_task = None
+    _clear_current_task()
