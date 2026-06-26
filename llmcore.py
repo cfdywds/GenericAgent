@@ -971,6 +971,7 @@ def _redact_sensitive_text(content):
     return _redact_freeform_text(text)
 
 def _write_llm_log(label, content, log_path=None, model=''):
+    if log_path is False: return
     if not log_path:
         log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'temp/model_responses/model_responses_{os.getpid()}.txt')
     os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
