@@ -671,11 +671,43 @@ fn show_bridge_window(app_handle: &tauri::AppHandle) {
     if let Some(main_win) = app_handle.get_webview_window("main") {
         let url = tauri::Url::parse("http://127.0.0.1:14168/").unwrap();
         let _ = main_win.navigate(url);
-        let _ = main_win.show();
-        let _ = main_win.set_focus();
+        focus_desktop_window(&main_win);
     }
     if let Some(setup_win) = app_handle.get_webview_window("setup") {
         let _ = setup_win.hide();
+    }
+}
+
+fn focus_desktop_window(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.show();
+    #[cfg(windows)]
+    {
+        // Windows may refuse focus-stealing from a second launcher process unless the
+        // existing window briefly becomes topmost.
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_focus();
+        let _ = window.set_always_on_top(false);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window.set_focus();
+    }
+}
+
+fn restore_existing_instance_window(app: &tauri::AppHandle) {
+    if let Some(setup_win) = app.get_webview_window("setup") {
+        if setup_win.is_visible().unwrap_or(false) {
+            focus_desktop_window(&setup_win);
+            return;
+        }
+    }
+    if let Some(main_win) = app.get_webview_window("main") {
+        focus_desktop_window(&main_win);
+        return;
+    }
+    if let Some(setup_win) = app.get_webview_window("setup") {
+        focus_desktop_window(&setup_win);
     }
 }
 
@@ -761,11 +793,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            restore_existing_instance_window(app);
         }))
         .invoke_handler(tauri::generate_handler![start_bridge_with_config, start_bridge, get_config, export_mykey, shortcut_should_ask, shortcut_decide])
         .setup(move |app| {

@@ -1423,9 +1423,9 @@ async def messages_handler(request):
         return json_ok({"ok": False, "error": "after and limit must be integers"}, status=400)
     if after < 0:
         return json_ok({"ok": False, "error": "after must be >= 0"}, status=400)
-    if limit < 1:
-        return json_ok({"ok": False, "error": "limit must be >= 1"}, status=400)
-    limit = min(limit, 1000)
+    if limit < 0:
+        return json_ok({"ok": False, "error": "limit must be >= 0"}, status=400)
+    limit = min(limit, 1000) if limit > 0 else 0
     return json_ok(manager.messages(sid, after=after, limit=limit))
 
 
