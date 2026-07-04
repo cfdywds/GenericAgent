@@ -80,6 +80,16 @@ native_oai_config = {
 #     'apibase': 'https://<your-grok2api-host>/v1',
 #     'model': 'grok-4.20-0309-non-reasoning',
 # }
+#
+#  The image_generation tool uses this image endpoint first. Environment
+#  variables also work: GROK2API_IMAGE_APIBASE / GROK2API_IMAGE_API_KEY /
+#  GROK2API_IMAGE_MODEL. If IMAGE_* variables are missing, it falls back to
+#  GROK2API_APIBASE / GROK2API_API_KEY.
+# grok2api_image_config = {
+#     'apikey': 'sk-<your-grok2api-key>',
+#     'apibase': 'https://<your-grok2api-host>/v1',
+#     'model': 'grok-imagine-image-lite',
+# }
 
 
 # ── 6. Chat platform integrations (optional) ─────────────────────────────────

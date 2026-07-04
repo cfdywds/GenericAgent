@@ -297,6 +297,15 @@ mixin_config = {
 #     'apibase': 'https://<your-grok2api-host>/v1',
 #     'model': 'grok-4.20-0309-non-reasoning',
 # }
+#
+#  image_generation 工具优先使用这里的图片端点；也可用环境变量覆盖：
+#  GROK2API_IMAGE_APIBASE / GROK2API_IMAGE_API_KEY / GROK2API_IMAGE_MODEL。
+#  若未设置 IMAGE_*，会回退到 GROK2API_APIBASE / GROK2API_API_KEY。
+# grok2api_image_config = {
+#     'apikey': 'sk-<your-grok2api-key>',
+#     'apibase': 'https://<your-grok2api-host>/v1',
+#     'model': 'grok-imagine-image-lite',
+# }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

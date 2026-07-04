@@ -674,6 +674,102 @@ class GenericAgentHandler(BaseHandler):
                 "google_error": google_error,
                 "grok_config_hint": "Configure grok2api_search_config in mykey.py or set GROK2API_APIBASE/GROK2API_API_KEY/GROK2API_MODEL.",
             }, next_prompt="\n")
+
+    def do_image_generation(self, args, response):
+        '''通过 grok2api/OpenAI 兼容 /images/generations 端点生成图片，返回图片 URL。'''
+        import urllib.request, urllib.error, ssl as _ssl
+        from llmcore import reload_mykeys
+        prompt = (args.get("prompt") or "").strip()
+        if not prompt:
+            return StepOutcome({"status": "error", "msg": "prompt is required"}, next_prompt="\n")
+        model = args.get("model") or "grok-imagine-image-lite"
+        n = int(args.get("n") or 1)
+        size = args.get("size") or None
+        extra = args.get("extra") or {}
+        if not isinstance(extra, dict):
+            extra = {}
+
+        mykeys, _ = reload_mykeys()
+        cfg = (
+            mykeys.get("grok2api_image_config")
+            or mykeys.get("grok2api_config")
+            or {}
+        )
+        def _usable_secret(value):
+            value = str(value or "").strip()
+            lowered = value.lower()
+            if lowered in {"", "changeme", "your-api-key", "your_api_key", "<your-grok2api-key>", "sk-<your-grok2api-key>"}:
+                return ""
+            if "<your-" in lowered:
+                return ""
+            return value
+        def _format_error(err):
+            if isinstance(err, urllib.error.HTTPError):
+                try:
+                    body = err.read().decode("utf-8", errors="replace").strip()
+                except Exception:
+                    body = ""
+                msg = f"HTTP {err.code} {err.reason}"
+                if body:
+                    msg += f": {smart_format(body, max_str_len=700)}"
+                return msg
+            return f"{type(err).__name__}: {err}"
+
+        apibase = (cfg.get("apibase") or os.environ.get("GROK2API_IMAGE_APIBASE") or os.environ.get("GROK2API_APIBASE") or "https://grok.obxunil.eu.cc/v1").rstrip("/")
+        endpoint = apibase if apibase.endswith("/images/generations") else f"{apibase}/images/generations"
+        apikey = (
+            _usable_secret(cfg.get("apikey"))
+            or _usable_secret(cfg.get("api_key"))
+            or _usable_secret(os.environ.get("GROK2API_IMAGE_API_KEY"))
+            or _usable_secret(os.environ.get("GROK2API_API_KEY"))
+            or "123"
+        )
+        model = cfg.get("model") or os.environ.get("GROK2API_IMAGE_MODEL") or model
+        body = {"model": model, "prompt": prompt, "n": n}
+        if size:
+            body["size"] = size
+        body.update(extra)
+        payload = json.dumps(body).encode("utf-8")
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        req = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {apikey}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180, context=ctx) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            images = data.get("data", []) if isinstance(data, dict) else []
+            urls = [item.get("url") for item in images if isinstance(item, dict) and item.get("url")]
+            b64_items = [item.get("b64_json") for item in images if isinstance(item, dict) and item.get("b64_json")]
+            if not urls and not b64_items:
+                raise ValueError(f"image API returned no image data: {smart_format(data, max_str_len=700)}")
+            self.print(f"[image_generation] Grok图片生成成功: {prompt[:80]}")
+            return StepOutcome({
+                "status": "success",
+                "channel": "grok2api_images",
+                "prompt": prompt,
+                "model": model,
+                "urls": urls,
+                "b64_json_count": len(b64_items),
+                "raw": data,
+            }, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
+        except Exception as e:
+            err = _format_error(e)
+            self.print(f"[image_generation] Grok图片生成失败: {err}")
+            return StepOutcome({
+                "status": "error",
+                "msg": err,
+                "config_hint": "Configure grok2api_image_config in mykey.py or set GROK2API_IMAGE_APIBASE/GROK2API_IMAGE_API_KEY/GROK2API_IMAGE_MODEL; falls back to GROK2API_APIBASE/GROK2API_API_KEY.",
+            }, next_prompt="\n")
     
     def do_file_patch(self, args, response):
         path = self._get_abs_path(args.get("path", ""))

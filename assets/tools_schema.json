@@ -83,5 +83,16 @@
       "query": {"type": "string", "description": "Search query in natural language"},
       "max_results": {"type": "integer", "description": "Max number of source results to return", "default": 5}
     }, "required": ["query"]}}
+  },
+  {"type": "function", "function": {
+    "name": "image_generation",
+    "description": "Generate images through grok2api/OpenAI-compatible /images/generations endpoint. Returns image URLs or b64_json count. Use for creating images from text prompts.",
+    "parameters": {"type": "object", "properties": {
+      "prompt": {"type": "string", "description": "Image prompt/description"},
+      "model": {"type": "string", "description": "Image model, e.g. grok-imagine-image-lite or grok-imagine-image", "default": "grok-imagine-image-lite"},
+      "n": {"type": "integer", "description": "Number of images", "default": 1},
+      "size": {"type": "string", "description": "Optional size if supported by endpoint, e.g. 1024x1024"},
+      "extra": {"type": "object", "description": "Optional extra JSON fields passed to image API"}
+    }, "required": ["prompt"]}}
   }
 ]
