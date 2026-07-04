@@ -8,6 +8,7 @@ PORT = 41983
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 SKINS_DIR = os.path.join(SCRIPT_DIR, 'skins')
+DEFAULT_SKIN = os.environ.get('GA_DESKTOP_PET_SKIN', 'ameath')
 
 class SkinLoader:
     """Load and parse skin configuration"""
@@ -239,6 +240,82 @@ class PetBase:
         """Thread-safe wrapper for show_toast."""
         self._schedule_main(lambda m=message: self.show_toast(m))
 
+    ACTION_ALIASES = {
+        'idle': 'idle',
+        'standby': 'idle',
+        'working': 'walk',
+        'running': 'walk',
+        'think': 'thinking',
+        'thinking': 'thinking',
+        'llm': 'thinking',
+        'search': 'search',
+        'web_search': 'search',
+        'browse': 'browse',
+        'browser': 'browse',
+        'web': 'browse',
+        'code': 'code',
+        'run_code': 'code',
+        'read': 'read',
+        'file_read': 'read',
+        'write': 'write',
+        'patch': 'write',
+        'file_write': 'write',
+        'file_patch': 'write',
+        'memory': 'memory',
+        'checkpoint': 'memory',
+        'ask': 'ask',
+        'question': 'ask',
+        'fix': 'fix',
+        'repair': 'fix',
+        'success': 'success',
+        'ok': 'success',
+        'done': 'done',
+        'complete': 'done',
+        'error': 'error',
+        'failed': 'error',
+        'cancelled': 'cancelled',
+        'canceled': 'cancelled',
+        'stop': 'cancelled',
+    }
+
+    ACTION_FALLBACKS = {
+        'thinking': 'idle',
+        'search': 'walk',
+        'browse': 'walk',
+        'code': 'run',
+        'read': 'idle',
+        'write': 'idle',
+        'memory': 'idle',
+        'ask': 'idle',
+        'fix': 'walk',
+        'success': 'idle',
+        'error': 'idle',
+        'done': 'idle',
+        'cancelled': 'idle',
+    }
+
+    def set_action_safe(self, action, message=None):
+        """Thread-safe wrapper for semantic GA actions."""
+        self._schedule_main(lambda a=action, m=message: self.set_action(a, m))
+
+    def _state_for_action(self, action):
+        action = str(action or 'idle').strip().lower().replace('-', '_')
+        state = self.ACTION_ALIASES.get(action, action)
+        animations = getattr(self, 'animations', {})
+        if state in animations:
+            return state
+        fallback = self.ACTION_FALLBACKS.get(state, 'idle')
+        if fallback in animations:
+            return fallback
+        return next(iter(animations), 'idle')
+
+    def set_action(self, action, message=None):
+        """Apply a semantic action, then optionally show a short toast."""
+        state = self._state_for_action(action)
+        self.set_state(state)
+        if message:
+            self.show_toast(message)
+
     def _start_server(self):
         """Start HTTP control server."""
         pet = self
@@ -248,7 +325,14 @@ class PetBase:
                 parsed = urlparse(self.path)
                 params = parse_qs(parsed.query)
 
-                if 'state' in params:
+                if 'action' in params:
+                    action = params['action'][0]
+                    msg = params.get('msg', [''])[0]
+                    pet.set_action_safe(action, msg)
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'ok')
+                elif 'state' in params:
                     state = params['state'][0]
                     pet.set_state_safe(state)
                     self.send_response(200)
@@ -263,7 +347,7 @@ class PetBase:
                 else:
                     self.send_response(400)
                     self.end_headers()
-                    self.wfile.write(b'?state=idle/walk/run/sprint or ?msg=hello')
+                    self.wfile.write(b'?action=search&msg=hello or ?state=idle/walk/run/sprint or ?msg=hello')
 
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get('Content-Length', 0))).decode()
@@ -284,7 +368,7 @@ class PetBase:
             HTTPServer.allow_reuse_address = True
             srv = HTTPServer(('127.0.0.1', PORT), Handler)
             threading.Thread(target=srv.serve_forever, daemon=True).start()
-            print(f'✓ Server: http://127.0.0.1:{PORT}/?state=walk')
+            print(f'✓ Server: http://127.0.0.1:{PORT}/?action=search&msg=hello')
         except OSError as e:
             if e.errno == 48:
                 print(f'⚠ Port {PORT} already in use')
@@ -1080,11 +1164,11 @@ if __name__ == '__main__':
         pass
 
     if sys.platform == 'darwin':
-        pet = MacPet('vita')
+        pet = MacPet(DEFAULT_SKIN)
         pet.run()
     elif sys.platform.startswith('win'):
-        pet = WinPet('vita')
+        pet = WinPet(DEFAULT_SKIN)
     else:
-        pet = LinuxPet('vita')
+        pet = LinuxPet(DEFAULT_SKIN)
         pet.run()
 

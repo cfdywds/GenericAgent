@@ -6,7 +6,10 @@
   "description": "爱弥斯 / Ameath - pink flowing hair, teal accents, white-and-navy frilled outfit",
   "style": "chibi",
   "format": "sprite",
-  "size": { "width": 128, "height": 156 },
+  "size": {
+    "width": 128,
+    "height": 156
+  },
   "animations": {
     "idle": {
       "file": "skin.png",
@@ -54,6 +57,162 @@
         "columns": 8,
         "fps": 16,
         "startFrame": 24
+      }
+    },
+    "thinking": {
+      "file": "action_thinking.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 6,
+        "columns": 6,
+        "fps": 8,
+        "startFrame": 0
+      }
+    },
+    "search": {
+      "file": "action_search.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 8,
+        "columns": 8,
+        "fps": 10,
+        "startFrame": 0
+      }
+    },
+    "browse": {
+      "file": "action_browse.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 8,
+        "columns": 8,
+        "fps": 10,
+        "startFrame": 0
+      }
+    },
+    "code": {
+      "file": "action_code.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 8,
+        "columns": 8,
+        "fps": 10,
+        "startFrame": 0
+      }
+    },
+    "read": {
+      "file": "action_read.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 6,
+        "columns": 6,
+        "fps": 8,
+        "startFrame": 0
+      }
+    },
+    "write": {
+      "file": "action_write.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 8,
+        "columns": 8,
+        "fps": 10,
+        "startFrame": 0
+      }
+    },
+    "memory": {
+      "file": "action_memory.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 6,
+        "columns": 6,
+        "fps": 8,
+        "startFrame": 0
+      }
+    },
+    "ask": {
+      "file": "action_ask.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 6,
+        "columns": 6,
+        "fps": 8,
+        "startFrame": 0
+      }
+    },
+    "fix": {
+      "file": "action_fix.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 8,
+        "columns": 8,
+        "fps": 10,
+        "startFrame": 0
+      }
+    },
+    "success": {
+      "file": "action_success.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 6,
+        "columns": 6,
+        "fps": 10,
+        "startFrame": 0
+      }
+    },
+    "error": {
+      "file": "action_error.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 6,
+        "columns": 6,
+        "fps": 10,
+        "startFrame": 0
+      }
+    },
+    "done": {
+      "file": "action_done.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 6,
+        "columns": 6,
+        "fps": 10,
+        "startFrame": 0
+      }
+    },
+    "cancelled": {
+      "file": "action_cancelled.png",
+      "loop": true,
+      "sprite": {
+        "frameWidth": 164,
+        "frameHeight": 198,
+        "frameCount": 6,
+        "columns": 6,
+        "fps": 8,
+        "startFrame": 0
       }
     }
   }

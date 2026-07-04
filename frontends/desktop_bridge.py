@@ -36,7 +36,7 @@ WS API (state sync):
 """
 from __future__ import annotations
 
-import asyncio, atexit, contextlib, importlib, json, os, re, secrets, subprocess, sys
+import asyncio, atexit, contextlib, importlib, json, os, re, secrets, socket, subprocess, sys
 from collections import Counter, deque
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
@@ -863,6 +863,17 @@ hub = WsHub()
 
 _SKIP = frozenset({"goal_mode.py", "chatapp_common.py", "tuiapp.py", "qtapp.py"})
 BRIDGE_ID = "__bridge__"
+DESKTOP_PET_PORT = 41983
+
+
+def _desktop_pet_script_id() -> str:
+    mode = os.environ.get("GA_DESKTOP_PET_MODE", "2d").strip().lower()
+    if mode in {"3d", "three", "webgl"}:
+        return "frontends/desktop_pet_3d.pyw"
+    return "frontends/desktop_pet_v2.pyw"
+
+
+DESKTOP_PET_ID = _desktop_pet_script_id()
 
 _SERVICE_KEYS: Dict[str, tuple] = {
     "frontends/qqapp.py": ("qq_app_id", "qq_app_secret"),
@@ -915,6 +926,13 @@ def discover_extra_services(ga_root: Path) -> List[dict]:
             "id": "frontends/conductor.py",
             "cmd": [sys.executable, "frontends/conductor.py", "--no-browser"],
         })
+    pet_rel = DESKTOP_PET_ID
+    pet = ga_root / pet_rel
+    if pet.is_file() and os.environ.get("GA_DESKTOP_PET_AUTOSTART", "1").strip().lower() not in {"0", "false", "no", "off"}:
+        out.append({
+            "id": DESKTOP_PET_ID,
+            "cmd": [sys.executable, pet_rel],
+        })
     return out
 
 
@@ -958,6 +976,14 @@ def _cpu_pct(pid: Optional[int]) -> Optional[float]:
         return None
 
 
+def _desktop_pet_live(timeout: float = 0.15) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", DESKTOP_PET_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 class ServiceManager:
     """hub.pyw ServiceManager + HTTP/WS glue."""
 
@@ -988,10 +1014,12 @@ class ServiceManager:
 
     def _state(self, sid: str, *, err: str = "") -> dict:
         proc = self.procs.get(sid)
-        running = proc is not None and proc.poll() is None
+        proc_running = proc is not None and proc.poll() is None
+        pet_live = sid == DESKTOP_PET_ID and _desktop_pet_live()
+        running = proc_running or pet_live
         status = "running" if running else "offline"
         last_error = err
-        if proc is not None and proc.poll() is not None:
+        if proc is not None and proc.poll() is not None and not pet_live:
             if sid in self._stopping:
                 status, last_error = "offline", ""
             else:
@@ -1003,7 +1031,7 @@ class ServiceManager:
             "id": sid,
             "status": status,
             "running": running,
-            "pid": proc.pid if running else None,
+            "pid": proc.pid if proc_running else None,
             "lastError": last_error,
         }
 
@@ -1060,6 +1088,8 @@ class ServiceManager:
             raise KeyError(sid)
         proc = self.procs.get(sid)
         if proc is not None and proc.poll() is None:
+            return {"ok": True, "service": self._state(sid)}
+        if sid == DESKTOP_PET_ID and _desktop_pet_live():
             return {"ok": True, "service": self._state(sid)}
         if not self._is_configured(sid):
             keys = ", ".join(_SERVICE_KEYS.get(sid, ()))

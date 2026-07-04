@@ -112,9 +112,11 @@ def render_sidebar():
         agent.abort(); st.toast("Stop signal sended"); st.rerun()
     if st.button(T('desktop_pet')):
         kwargs = {'creationflags': 0x08} if sys.platform == 'win32' else {}
-        pet_script = os.path.join(script_dir, 'desktop_pet_v2.pyw')
+        pet_mode = os.environ.get('GA_DESKTOP_PET_MODE', '2d').strip().lower()
+        pet_name = 'desktop_pet_3d.pyw' if pet_mode in {'3d', 'three', 'webgl'} else 'desktop_pet_v2.pyw'
+        pet_script = os.path.join(script_dir, pet_name)
         if not os.path.exists(pet_script):
-            st.error("desktop_pet_v2.pyw not found")
+            st.error(f"{pet_name} not found")
             return
         subprocess.Popen([sys.executable, pet_script], **kwargs)
         def _pet_req(q):
@@ -129,7 +131,7 @@ def render_sidebar():
             if ctx.get('summary'): parts.append(ctx['summary'])
             if ctx.get('exit_reason'): parts.append('DONE')
             _pet_req(f'msg={quote(chr(10).join(parts))}')
-            if ctx.get('exit_reason'): _pet_req('state=idle')
+            if ctx.get('exit_reason'): _pet_req('action=done')
         agent._turn_end_hooks['pet'] = _pet_hook
         st.toast("Desktop pet started")
     
@@ -378,7 +380,7 @@ if prompt:
     # Regular prompt: any in-flight task will be aborted by the finally block in
     # agent_backend_stream when StopException interrupts the prior generator.
     st.session_state.messages.append({"role": "user", "content": prompt})
-    if hasattr(agent, '_pet_req') and not prompt.startswith('/'): agent._pet_req('state=walk')
+    if hasattr(agent, '_pet_req') and not prompt.startswith('/'): agent._pet_req('action=working')
     with st.chat_message("user"): st.markdown(prompt)
     render_main_stream(prompt)
 elif st.session_state.get('display_queue') is not None:
