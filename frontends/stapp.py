@@ -26,7 +26,31 @@ st.markdown("""
 <style>
 [data-testid="stBottom"]{position:fixed!important;bottom:0!important;left:0!important;right:0!important;width:100vw!important;z-index:999;background:var(--background-color,#fff)}
 @media (min-width:768px){[data-testid="stSidebar"][aria-expanded="true"]~div [data-testid="stBottom"]{left:300px!important;width:calc(100vw - 300px)!important}}
-.stMainBlockContainer{padding-bottom:10rem!important}
+.stMainBlockContainer{padding-top:1.75rem!important;padding-bottom:8rem!important}
+[data-testid="stChatMessage"]{padding:0.35rem 0.25rem!important;margin-bottom:0.15rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"]{font-size:1.06rem!important;line-height:1.46!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p{margin:0 0 0.35rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p:last-child{margin-bottom:0!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] ul,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] ol{margin:0.1rem 0 0.4rem!important;padding-left:1.25rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li{margin:0.05rem 0!important;padding-left:0.05rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h1,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h2,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h3,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h4{margin:0.55rem 0 0.25rem!important;line-height:1.24!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h1{font-size:1.35rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h2{font-size:1.2rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h3{font-size:1.08rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] pre{margin:0.35rem 0!important;padding:0.55rem 0.65rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] code{font-size:0.95em!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] blockquote{margin:0.25rem 0 0.4rem!important;padding-left:0.75rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] hr{margin:0.6rem 0!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] table{margin:0.25rem 0 0.45rem!important}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] th,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] td{padding:0.25rem 0.45rem!important}
+[data-testid="stExpander"]{margin:0.25rem 0!important}
+[data-testid="stExpander"] summary{padding:0.35rem 0.55rem!important}
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"]{font-size:1.04rem!important;line-height:1.45!important}
 </style>
 """, unsafe_allow_html=True)
 
@@ -205,6 +229,53 @@ def fold_turns(text):
         else: segments.append({'type': 'text', 'content': marker + content})
     return segments
 _SUMMARY_TAG_RE = re.compile(r'<summary>.*?</summary>\s*', re.DOTALL)
+_IMAGE_URL_RE = re.compile(r'https?://[^\s<>\]})"\']+', re.IGNORECASE)
+_IMAGE_MD_RE = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
+
+
+def _normalize_image_url(url):
+    if not url: return ''
+    url = url.strip().replace('\\/', '/')
+    url = url.strip('`"\'<>[]{}()\\')
+    url = re.sub(r'[\\.,;:!?]+$', '', url)
+    return url
+
+
+def _is_likely_image_url(url):
+    u = _normalize_image_url(url)
+    if not re.match(r'^https?://', u, re.IGNORECASE): return False
+    low = u.lower()
+    return bool(
+        re.search(r'\.(png|jpe?g|gif|webp|bmp|svg|avif)(?:[?#].*)?$', low)
+        or re.search(r'/v\d+/files/image(?:[/?#]|$)', low)
+        or re.search(r'/(?:files?/)?image(?:[/?#]|$)', low)
+        or re.search(r'/(?:img|images|generation|generated)(?:[/?#]|$)', low)
+    )
+
+
+def extract_image_urls(text):
+    seen, urls = set(), []
+    for m in _IMAGE_MD_RE.finditer(text or ''):
+        u = _normalize_image_url(m.group(1))
+        if _is_likely_image_url(u) and u not in seen:
+            seen.add(u); urls.append(u)
+    for m in _IMAGE_URL_RE.finditer((text or '').replace('\\/', '/')):
+        u = _normalize_image_url(m.group(0))
+        if _is_likely_image_url(u) and u not in seen:
+            seen.add(u); urls.append(u)
+    return urls
+
+
+def render_markdown_with_image_previews(content, suffix=''):
+    st.markdown((content or '') + suffix)
+    # Streamlit markdown will not render image URLs hidden inside JSON/stdout/code fences.
+    # Add an explicit preview fallback for tool results such as grok2api /v1/files/image?id=...
+    for url in extract_image_urls(content or ''):
+        try:
+            st.image(url)
+        except Exception:
+            st.markdown(f'[image]({url})')
+
 
 def render_segments(segments, suffix=''):
     # 整块重画：调用方用 slot.container() 包裹，保证 DOM 路径稳定、跨 rerun 对齐（消除"灰色重影"）。
@@ -212,9 +283,9 @@ def render_segments(segments, suffix=''):
     # 但 container/markdown 本身是 API 调用，StopException 仍会被抛出（abort 照常起作用）。
     for seg in segments:
         if seg['type'] == 'fold':
-            with st.expander(seg['title'], expanded=False): st.markdown(seg['content'])
+            with st.expander(seg['title'], expanded=False): render_markdown_with_image_previews(seg['content'])
         else:
-            st.markdown(seg['content'] + suffix)
+            render_markdown_with_image_previews(seg['content'], suffix=suffix)
 
 def agent_backend_stream(prompt=None):
     """Drain main task display_queue.

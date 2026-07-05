@@ -16,6 +16,8 @@ PET_PORT = int(os.environ.get("GA_DESKTOP_PET_PORT", "41983"))
 PET_URL = os.environ.get("GA_DESKTOP_PET_URL", f"http://127.0.0.1:{PET_PORT}/")
 ENABLED = os.environ.get("GA_DESKTOP_PET_STATUS", "1").strip().lower() not in {"0", "false", "no", "off"}
 TIMEOUT = float(os.environ.get("GA_DESKTOP_PET_TIMEOUT", "0.25"))
+LANGUAGE_ACTION = "write"
+LANGUAGE_MESSAGE = "组织语言中"
 
 TOOL_ACTIONS = {
     "web_search": "search",
@@ -99,7 +101,7 @@ def _outcome_status(ret):
 
 @hooks.register("llm_before")
 def _on_llm_before(ctx):
-    _send("thinking", "LLM思考中")
+    _send(LANGUAGE_ACTION, LANGUAGE_MESSAGE)
 
 
 @hooks.register("tool_before")
@@ -119,7 +121,7 @@ def _on_tool_after(ctx):
     status = _outcome_status(ret)
     _send(status, "完成" if status == "success" else "出错了")
     if getattr(ret, "next_prompt", None) and not getattr(ret, "should_exit", False):
-        _send_later(1.2, "thinking", "LLM思考中")
+        _send_later(1.2, LANGUAGE_ACTION, LANGUAGE_MESSAGE)
 
 
 @hooks.register("agent_after")

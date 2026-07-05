@@ -44,12 +44,12 @@ HTTP 控制端口：`41983`。
 
 Ameath 额外支持 GA 语义动作：
 
-- `thinking` - LLM 思考
+- `thinking` - 规划/思考
 - `search` - 网络搜索，宠物拿放大镜查电脑
 - `browse` - 浏览网页
 - `code` - 运行代码
 - `read` - 读取文件/资料
-- `write` - 写入或 patch 文件
+- `write` - 组织语言、写入或 patch 文件
 - `memory` - 更新工作记忆/长期记忆
 - `ask` - 等待用户确认
 - `fix` - 恢复或修复
@@ -58,7 +58,7 @@ Ameath 额外支持 GA 语义动作：
 - `done` - 任务完成
 - `cancelled` - 任务取消
 
-这些动作在 `frontends/skins/ameath/action_*.png` 中以独立精灵表保存，`skin.json` 中作为一等动画状态注册。Ameath 的语义动作通过角色动作和手边道具交互表达，例如记事板思考、卡片归档、翻书、写板、敲小终端；明确说明仍由气泡消息承载，避免回到贴牌式状态图标或大号文字。
+这些动作在 `frontends/skins/ameath/action_*.png` 中以独立精灵表保存，`skin.json` 中作为一等动画状态注册。Ameath 的语义动作通过角色本体姿势和手边道具共同表达，例如侧身搜索、面向屏幕浏览、敲小终端、写板组织语言；明确说明仍由气泡消息承载，避免回到贴牌式状态图标或大号文字。
 
 ### 3. 交互功能
 
@@ -86,7 +86,7 @@ curl -X POST -d "任务完成" http://127.0.0.1:41983/
 
 `plugins/desktop_pet_status.py` 会随 `agentmain.py` 的插件发现机制自动加载。它监听 GA 的 hook：
 
-- `llm_before` -> `thinking`
+- `llm_before` -> `write`
 - `tool_before` -> 按工具名映射动作
 - `tool_after` -> `success` / `error`
 - `agent_after` -> `done`，随后回到 `idle`

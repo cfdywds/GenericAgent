@@ -1105,8 +1105,130 @@ if (typeof marked !== 'undefined') {
   marked.setOptions({ gfm: true, breaks: true, mangle: false, headerIds: false });
 }
 const ALLOWED_URI_RE = /^(https?:|mailto:|tel:|#|\/)/i;
+const ALLOWED_IMG_SRC_RE = /^(https?:|data:image\/(?:png|jpe?g|gif|webp|bmp|svg\+xml);base64,|blob:|#|\/)/i;
 function escapeHtml(s) {
   const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML;
+}
+function isSafeMarkdownImgSrc(src) {
+  const v = String(src || '').trim();
+  if (!v) return false;
+  if (ALLOWED_IMG_SRC_RE.test(v)) return true;
+  if (/^(?:[A-Za-z]:[\\/]|\\\\|\.\.?[\\/])/.test(v)) return true;
+  return false;
+}
+function normalizeMarkdownImgSrc(src) {
+  const v = String(src || '').trim();
+  if (!v) return '';
+  if (/^(?:[A-Za-z]:[\\/]|\\\\|\.\.?[\\/])/.test(v)) return uploadRawUrl(v);
+  return v;
+}
+function allowMarkdownUri(el, attrName, value) {
+  const n = String(attrName || '').toLowerCase();
+  const v = String(value || '').trim();
+  if (!v) return true;
+  if (el?.tagName === 'IMG' && n === 'src') return isSafeMarkdownImgSrc(v);
+  return ALLOWED_URI_RE.test(v);
+}
+function isLikelyMarkdownImageUrl(url) {
+  const raw = String(url || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return false;
+  try {
+    const u = new URL(raw);
+    const path = u.pathname.toLowerCase();
+    if (/\.(?:png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(path)) return true;
+    // Many image-generation endpoints return signed URLs without a file extension.
+    // Examples: /v1/files/image?id=..., /v1/images/generations, /image/...
+    if (/(?:^|\/)(?:image|images|img|file|files|generated-images?|generations?)(?:\/|$)/i.test(path)) return true;
+    if (/\/(?:files\/image|images\/generations)(?:\/|$)/i.test(path)) return true;
+  } catch (_) {}
+  return false;
+}
+function cleanMarkdownImageUrl(url) {
+  let clean = String(url || '').trim()
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+  while (/[),.;!?]$/.test(clean) && !/[/?#][^\s]*[),.;!?]$/.test(clean)) clean = clean.slice(0, -1);
+  return clean;
+}
+function extractLikelyMarkdownImageUrls(text) {
+  const out = [];
+  const seen = new Set();
+  const add = (url) => {
+    const clean = cleanMarkdownImageUrl(url);
+    if (isLikelyMarkdownImageUrl(clean) && !seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  };
+  // Markdown image/link syntax first, including URLs inside JSON strings rendered in <pre>.
+  String(text || '').replace(/!\[[^\]\n]*\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (m, url) => { add(url); return m; });
+  const urlRe = /(^|[\s([{:=,"'])((?:https?:\/\/)[^\s<>()"']+)(?=\s|$|[\])}.,;!?"'])/g;
+  String(text || '').replace(urlRe, (m, pre, url) => { add(url); return m; });
+  return out;
+}
+function autoEmbedMarkdownImageUrls(text) {
+  let s = String(text || '');
+  const slots = [];
+  const protect = (re) => { s = s.replace(re, (m) => { const id = slots.length; slots.push(m); return `\x00MDIMG:${id}\x00`; }); };
+  protect(/```[\s\S]*?```/g);
+  protect(/`[^`\n]+`/g);
+  protect(/!\[[^\]\n]*\]\([^\s)]+(?:\s+"[^"]*")?\)/g);
+  protect(/\[[^\]\n]+\]\([^\s)]+(?:\s+"[^"]*")?\)/g);
+  const urlRe = /(^|[\s([{:=,"'])((?:https?:\/\/)[^\s<>()"']+)(?=\s|$|[\])}.,;!?"'])/g;
+  s = s.replace(urlRe, (m, pre, url) => {
+    let clean = url;
+    let tail = '';
+    while (/[),.;!?]$/.test(clean) && !/[/?#][^\s]*[),.;!?]$/.test(clean)) {
+      tail = clean.slice(-1) + tail;
+      clean = clean.slice(0, -1);
+    }
+    if (!isLikelyMarkdownImageUrl(clean)) return m;
+    return `${pre}![image](${clean})${tail}`;
+  });
+  return s.replace(/\x00MDIMG:(\d+)\x00/g, (_, i) => slots[Number(i)] || '');
+}
+function renderedImageSrcSet(html) {
+  const out = new Set();
+  const add = (url) => {
+    const clean = cleanMarkdownImageUrl(url);
+    if (clean) out.add(clean);
+  };
+  try {
+    if (typeof document !== 'undefined' && document.createElement) {
+      const tpl = document.createElement('template');
+      if (tpl.content && typeof tpl.content.querySelectorAll === 'function') {
+        tpl.innerHTML = String(html || '');
+        tpl.content.querySelectorAll('img').forEach(img => add(img.getAttribute('src') || ''));
+        return out;
+      }
+    }
+  } catch (_) {}
+  const raw = String(html || '');
+  raw.replace(/<img\b[^>]*\bsrc\s*=\s*(['"])(.*?)\1/gi, (m, q, src) => { add(src); return m; });
+  raw.replace(/<img\b[^>]*\bsrc\s*=\s*([^\s"'=<>`]+)/gi, (m, src) => { add(src); return m; });
+  return out;
+}
+function renderToolResultImagePreviews(body, skipUrls) {
+  const skip = new Set();
+  for (const url of (skipUrls || [])) {
+    const clean = cleanMarkdownImageUrl(url);
+    if (clean) skip.add(clean);
+  }
+  const urls = extractLikelyMarkdownImageUrls(body).filter(url => !skip.has(cleanMarkdownImageUrl(url)));
+  if (!urls.length) return '';
+  const imgs = urls.map((url, i) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><img src="${escapeHtml(url)}" alt="generated image ${i + 1}" loading="lazy"></a>`).join('');
+  return `<div class="tool-result-images">${imgs}</div>`;
+}
+function renderTurnBodyWithImageFallback(body) {
+  const html = renderTurnBody(body);
+  // renderTurnBody intentionally protects fenced code blocks. Tool stdout often
+  // contains JSON like {"urls":["https://.../v1/files/image?id=..."]}; add a
+  // turn-level fallback so generated images inside stdout still show up.
+  const fallback = renderToolResultImagePreviews(body, renderedImageSrcSet(html));
+  return fallback ? `${html}${fallback}` : html;
 }
 /** GA list_llms 形如 SessionClass/备注；桌面 UI 只展示 / 后一段 */
 function profileLabel(name) {
@@ -1129,7 +1251,8 @@ function sanitizeMarkdown(html) {
     for (const attr of Array.from(el.attributes)) {
       const n = attr.name.toLowerCase(), v = attr.value.trim();
       if (n.startsWith('on') || n === 'srcdoc') { el.removeAttribute(attr.name); continue; }
-      if ((n === 'href' || n === 'src' || n === 'xlink:href') && v && !ALLOWED_URI_RE.test(v)) el.removeAttribute(attr.name);
+      if ((n === 'href' || n === 'src' || n === 'xlink:href') && !allowMarkdownUri(el, n, v)) { el.removeAttribute(attr.name); continue; }
+      if (el.tagName === 'IMG' && n === 'src') el.setAttribute(attr.name, normalizeMarkdownImgSrc(v));
     }
     if (el.tagName === 'A') { el.setAttribute('rel','noopener noreferrer'); el.setAttribute('target','_blank'); }
   }
@@ -1202,7 +1325,8 @@ function restoreLatex(html) {
 function renderMarkdown(text) {
   if (typeof marked === 'undefined') return escapeHtml(text).replace(/\n/g, '<br>');
   try {
-    const protected_ = protectLatex(String(text || ''));
+    const autoImageText = autoEmbedMarkdownImageUrls(String(text || ''));
+    const protected_ = protectLatex(autoImageText);
     let html = sanitizeMarkdown(marked.parse(protected_));
     html = restoreLatex(html);
     // TUI 风格代码块：包装 pre>code 为 .code-block 容器 + 语言头
@@ -1444,7 +1568,8 @@ function renderTurnBody(body) {
       const f = folds[Number(i)];
       if (!f) return '';
       const openAttr = f.open ? ' open' : '';
-      return `<details class="fold ${f.cls}"${openAttr}><summary>${escapeHtml(f.label)}</summary><pre class="fold-pre">${escapeHtml(f.body)}</pre></details>`;
+      const previews = String(f.cls || '').includes('fold-result') ? renderToolResultImagePreviews(f.body) : '';
+      return `<details class="fold ${f.cls}"${openAttr}><summary>${escapeHtml(f.label)}</summary><pre class="fold-pre">${escapeHtml(f.body)}</pre>${previews}</details>`;
     });
   return html;
 }
@@ -1470,7 +1595,7 @@ function renderTurnFold(body, turnIndex) {
   const raw = stripTurnMarker(body);
   const sum = extractTurnSummaryPure(raw);
   const bodyForRender = sum ? raw.replace(/<summary>[\s\S]*?<\/summary>\s*/i, '') : raw;
-  const inner = renderTurnBody(bodyForRender);
+  const inner = renderTurnBodyWithImageFallback(bodyForRender);
   const turnLabel = t('fold.turn').replace('{n}', turnDisplayNo(turnIndex));
   const head = sum
     ? `${escapeHtml(turnLabel)}：<span class="turn-head-sum">${escapeHtml(sum)}</span>`
@@ -2316,7 +2441,7 @@ function renderAssistantTurnsHtml(segs, currTurn, withCursor = false) {
   for (let i = first; i < curr; i++) {
     if ((arr[i] || '').length > 0) html += `<div class="turn-frozen" data-turn="${i}">${renderTurnFold(arr[i] || '', i)}</div>`;
   }
-  html += `<div class="turn-cur" data-turn="${curr}">${renderTurnBody(arr[curr] || '')}${withCursor ? '<span class="cursor"></span>' : ''}</div>`;
+  html += `<div class="turn-cur" data-turn="${curr}">${renderTurnBodyWithImageFallback(arr[curr] || '')}${withCursor ? '<span class="cursor"></span>' : ''}</div>`;
   return html;
 }
 function assistantCopyText(msg) {
@@ -2622,7 +2747,7 @@ function paintDraft(r, turn, visibleCurrBody) {
   const body = visibleCurrBody || '';
   const prevBody = r._draftPaintBody || '';
   if (!tryPatchInflightToolDom(cur, body, prevBody)) {
-    cur.innerHTML = renderTurnBody(body) + '<span class="cursor"></span>';
+    cur.innerHTML = renderTurnBodyWithImageFallback(body) + '<span class="cursor"></span>';
     postRenderEnhance(cur);
   } else if (!cur.querySelector('.cursor')) {
     cur.insertAdjacentHTML('beforeend', '<span class="cursor"></span>');
@@ -4913,7 +5038,7 @@ document.addEventListener('keydown', (e) => {
 });
 if (msgArea) {
   msgArea.addEventListener('click', (e) => {
-    const img = e.target.closest('.user-imgs img');
+    const img = e.target.closest('.user-imgs img, .md img');
     if (img && img.src) { openLightbox(img.src); return; }
     const fileChip = e.target.closest('.user-files .file-chip');
     if (fileChip) {
@@ -5966,7 +6091,7 @@ function bindComposerInRoot(root, opts) {
     drawerEl.innerHTML = `<div class="collab-drawer-backdrop"></div><aside class="collab-drawer"><div class="collab-drawer-head"><span class="collab-drawer-title">${esc(w.title)}</span><button class="modal-x collab-drawer-close">${GA_ICON('x')}</button></div><div class="collab-drawer-body"><div class="bubble md"></div></div></aside>`;
     const bubble = drawerEl.querySelector('.collab-drawer-body .bubble');
     if (bubble) {
-      bubble.innerHTML = renderTurnBody(w.fullReply || t('collab.summaryWait'));
+      bubble.innerHTML = renderTurnBodyWithImageFallback(w.fullReply || t('collab.summaryWait'));
       postRenderEnhance(bubble);
     }
     drawerEl.querySelector('.collab-drawer-backdrop').onclick = closeWorkerDrawer;

@@ -1,0 +1,9 @@
+
+ ⛅️ wrangler 4.102.0 (update available 4.105.0)
+───────────────────────────────────────────────
+Total Upload: 453.86 KiB / gzip: 96.47 KiB
+Worker Startup Time: 5 ms
+Uploaded web2gem (2.85 sec)
+Deployed web2gem triggers (1.26 sec)
+  https://web2gem.wanghaijuntly.workers.dev
+Current Version ID: 37d127bb-943e-4e59-b8f2-8e664f26d34d

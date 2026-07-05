@@ -1987,6 +1987,38 @@ html[data-appearance="dark"] .ga-menu-item.active{
 }
 .lightbox-x:hover{ color:var(--danger); }
 .thumb img{ cursor:zoom-in; }
+.md img{
+  display:block;
+  max-width:min(100%, 520px);
+  max-height:360px;
+  width:auto;
+  height:auto;
+  margin:8px 0;
+  border-radius:12px;
+  object-fit:contain;
+  background:var(--bg-2);
+  border:1px solid var(--border);
+  cursor:zoom-in;
+}
+.tool-result-images{
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+  margin:8px 12px 12px;
+}
+.tool-result-images a{ display:block; line-height:0; }
+.tool-result-images img{
+  display:block;
+  max-width:min(100%, 520px);
+  max-height:360px;
+  width:auto;
+  height:auto;
+  border-radius:12px;
+  object-fit:contain;
+  background:var(--bg-2);
+  border:1px solid var(--border);
+  cursor:zoom-in;
+}
 
 /* ─── 自定义预设：卡上的删除按钮 ─── */
 .fcard{ position:relative; }
