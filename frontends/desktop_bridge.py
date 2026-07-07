@@ -864,16 +864,7 @@ hub = WsHub()
 _SKIP = frozenset({"goal_mode.py", "chatapp_common.py", "tuiapp.py", "qtapp.py"})
 BRIDGE_ID = "__bridge__"
 DESKTOP_PET_PORT = 41983
-
-
-def _desktop_pet_script_id() -> str:
-    mode = os.environ.get("GA_DESKTOP_PET_MODE", "2d").strip().lower()
-    if mode in {"3d", "three", "webgl"}:
-        return "frontends/desktop_pet_3d.pyw"
-    return "frontends/desktop_pet_v2.pyw"
-
-
-DESKTOP_PET_ID = _desktop_pet_script_id()
+DESKTOP_PET_ID = "frontends/desktop_pet_v2.pyw"
 
 _SERVICE_KEYS: Dict[str, tuple] = {
     "frontends/qqapp.py": ("qq_app_id", "qq_app_secret"),

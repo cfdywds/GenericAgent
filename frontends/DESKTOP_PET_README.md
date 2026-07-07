@@ -8,12 +8,6 @@
 python frontends/desktop_pet_v2.pyw
 ```
 
-运行 3D 桌面宠物：
-
-```bash
-python frontends/desktop_pet_3d.pyw
-```
-
 默认皮肤是 `ameath`。如需指定皮肤，可设置环境变量：
 
 ```bash
@@ -22,8 +16,6 @@ python frontends/desktop_pet_v2.pyw
 ```
 
 HTTP 控制端口：`41983`。
-
-3D 版本使用 `pywebview` 承载本地 Three.js 场景，默认窗口为 `320x420`，仍然兼容同一个 HTTP 控制协议；GA 实时状态会同步到角色动作、状态光环、胸前核心和底部状态条。可用 `GA_DESKTOP_PET_3D_WIDTH` / `GA_DESKTOP_PET_3D_HEIGHT` 调整尺寸。
 
 ## 功能特性
 
@@ -44,12 +36,12 @@ HTTP 控制端口：`41983`。
 
 Ameath 额外支持 GA 语义动作：
 
-- `thinking` - 规划/思考
+- `thinking` - LLM 思考/生成
 - `search` - 网络搜索，宠物拿放大镜查电脑
 - `browse` - 浏览网页
 - `code` - 运行代码
 - `read` - 读取文件/资料
-- `write` - 组织语言、写入或 patch 文件
+- `write` - 写入或 patch 文件
 - `memory` - 更新工作记忆/长期记忆
 - `ask` - 等待用户确认
 - `fix` - 恢复或修复
@@ -58,7 +50,7 @@ Ameath 额外支持 GA 语义动作：
 - `done` - 任务完成
 - `cancelled` - 任务取消
 
-这些动作在 `frontends/skins/ameath/action_*.png` 中以独立精灵表保存，`skin.json` 中作为一等动画状态注册。Ameath 的语义动作通过角色本体姿势和手边道具共同表达，例如侧身搜索、面向屏幕浏览、敲小终端、写板组织语言；明确说明仍由气泡消息承载，避免回到贴牌式状态图标或大号文字。
+这些动作在 `frontends/skins/ameath/action_*.png` 中以独立精灵表保存，`skin.json` 中作为一等动画状态注册。Ameath 的语义动作主要通过角色本体姿势表达，例如侧身搜索、面向屏幕浏览、敲小终端、翻读资料、写板组织语言；状态文字会以头顶气泡显示，默认保留约 8 秒；气泡样式优先使用 `frontends/chat_bubble.png`，避免回到贴牌式状态图标或大号覆盖层。
 
 ### 3. 交互功能
 
@@ -69,27 +61,23 @@ Ameath 额外支持 GA 语义动作：
 ### 4. HTTP 远程控制
 
 ```bash
-# 显示消息
-curl "http://127.0.0.1:41983/?msg=Hello"
+# 切换语义动作
+curl "http://127.0.0.1:41983/?action=search&msg=正在搜索"
 
 # 旧接口：切换基础动画状态
 curl "http://127.0.0.1:41983/?state=run"
-
-# 新接口：切换语义动作并显示气泡
-curl "http://127.0.0.1:41983/?action=search&msg=正在搜索"
-
-# POST 消息
-curl -X POST -d "任务完成" http://127.0.0.1:41983/
 ```
+
+`msg` 参数和 POST 消息会显示为头顶气泡；人物动作仍由 `action` 或 `state` 控制。可用 `GA_DESKTOP_PET_TOAST_SECONDS` 调整气泡显示秒数。
 
 ## 与 GA 集成
 
 `plugins/desktop_pet_status.py` 会随 `agentmain.py` 的插件发现机制自动加载。它监听 GA 的 hook：
 
-- `llm_before` -> `write`
+- `llm_before` -> `thinking`
 - `tool_before` -> 按工具名映射动作
-- `tool_after` -> `success` / `error`
-- `agent_after` -> `done`，随后回到 `idle`
+- `tool_after` -> `success` / `error`，如下一轮继续则回到 `thinking`
+- `agent_after` -> `done` / `ask` / `cancelled` / `error`，随后回到 `idle`
 
 默认启用。可用环境变量关闭：
 
@@ -97,11 +85,7 @@ curl -X POST -d "任务完成" http://127.0.0.1:41983/
 set GA_DESKTOP_PET_STATUS=0
 ```
 
-桌面版 bridge 默认会把 `frontends/desktop_pet_v2.pyw` 作为 extra service 自动启动；如果要自动启动 3D 版本，设置：
-
-```bash
-set GA_DESKTOP_PET_MODE=3d
-```
+桌面版 bridge 默认会把 `frontends/desktop_pet_v2.pyw` 作为 extra service 自动启动。
 
 可用环境变量关闭自启：
 

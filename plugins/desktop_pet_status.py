@@ -16,8 +16,8 @@ PET_PORT = int(os.environ.get("GA_DESKTOP_PET_PORT", "41983"))
 PET_URL = os.environ.get("GA_DESKTOP_PET_URL", f"http://127.0.0.1:{PET_PORT}/")
 ENABLED = os.environ.get("GA_DESKTOP_PET_STATUS", "1").strip().lower() not in {"0", "false", "no", "off"}
 TIMEOUT = float(os.environ.get("GA_DESKTOP_PET_TIMEOUT", "0.25"))
-LANGUAGE_ACTION = "write"
-LANGUAGE_MESSAGE = "组织语言中"
+LANGUAGE_ACTION = "thinking"
+LANGUAGE_MESSAGE = "思考中"
 
 TOOL_ACTIONS = {
     "web_search": "search",
@@ -33,8 +33,12 @@ TOOL_ACTIONS = {
     "restore_quarantine": "fix",
 }
 
+_CONTINUE_RESULTS = {"MAX_TURNS_EXCEEDED"}
+_CANCELLED_RESULTS = {"CANCELLED", "CANCELED", "ABORTED", "INTERRUPTED", "USER_ABORT"}
+_ERROR_RESULTS = {"ERROR", "FAILED", "FAILURE", "EXCEPTION"}
 
-def _short(value, limit=64):
+
+def _short(value, limit=18):
     text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -42,23 +46,26 @@ def _short(value, limit=64):
 def _tool_message(tool_name, args):
     args = args or {}
     if tool_name == "web_search":
-        return "搜索: " + _short(args.get("query") or args.get("q") or "")
+        query = _short(args.get("query") or args.get("q") or "")
+        return f"搜索 {query}" if query else "搜索中"
     if tool_name in {"web_scan", "web_execute_js"}:
-        return "查看网页"
+        return "浏览网页"
     if tool_name == "code_run":
         return "运行代码"
     if tool_name == "file_read":
-        return "读取: " + _short(args.get("path") or "")
+        path = _short(args.get("path") or "")
+        return f"读取 {path}" if path else "读取文件"
     if tool_name in {"file_write", "file_patch"}:
-        return "修改: " + _short(args.get("path") or "")
+        path = _short(args.get("path") or "")
+        return f"写入 {path}" if path else "写入文件"
     if tool_name == "ask_user":
         return "等待确认"
     if tool_name == "update_working_checkpoint":
-        return "写入工作记忆"
+        return "写入记忆"
     if tool_name == "start_long_term_update":
-        return "整理长期记忆"
+        return "整理记忆"
     if tool_name == "restore_quarantine":
-        return "恢复隔离"
+        return "恢复中"
     return _short(tool_name.replace("_", " "))
 
 
@@ -99,6 +106,31 @@ def _outcome_status(ret):
     return "success"
 
 
+def _agent_done_action(result, maxed=False):
+    if maxed:
+        return "ask"
+    if isinstance(result, dict):
+        code = str(result.get("result") or result.get("status") or "").upper()
+    else:
+        code = str(result or "").upper()
+    if code in _CONTINUE_RESULTS:
+        return "ask"
+    if code in _CANCELLED_RESULTS:
+        return "cancelled"
+    if code in _ERROR_RESULTS:
+        return "error"
+    return "done"
+
+
+def _agent_done_message(action):
+    return {
+        "ask": "需要继续",
+        "cancelled": "已取消",
+        "error": "出错了",
+        "done": "完成",
+    }.get(action, "完成")
+
+
 @hooks.register("llm_before")
 def _on_llm_before(ctx):
     _send(LANGUAGE_ACTION, LANGUAGE_MESSAGE)
@@ -131,8 +163,6 @@ def _on_agent_after(ctx):
     turn = int(ctx.get("turn") or 0)
     max_turns = int(getattr(handler, "max_turns", 0) or 0)
     maxed = (not result) and max_turns and turn >= max_turns
-    if maxed or (isinstance(result, dict) and str(result.get("result", "")).upper() in {"MAX_TURNS_EXCEEDED"}):
-        _send("error", "需要继续")
-    else:
-        _send("done", "任务完成")
+    action = _agent_done_action(result, maxed=maxed)
+    _send(action, _agent_done_message(action))
     _send_later(1.8, "idle")

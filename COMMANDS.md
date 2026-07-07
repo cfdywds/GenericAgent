@@ -387,8 +387,8 @@ python agentmain.py --task task_name [--input "短任务"] [--llm_no N]
 
 **注意：**
 - 涉及后台进程；停止服务时要确认不是你仍需要的任务。
-- 桌面版 bridge 默认会把 `frontends/desktop_pet_v2.pyw` 作为额外服务自动启动；设置 `GA_DESKTOP_PET_MODE=3d` 时改为自启 `frontends/desktop_pet_3d.pyw`；如需关闭桌宠自启，设置 `GA_DESKTOP_PET_AUTOSTART=0`。
-- 手动启动可用 `ga pet` 启动 2D 桌宠，或用 `ga pet3d` 启动 3D 桌宠。
+- 桌面版 bridge 默认会把 `frontends/desktop_pet_v2.pyw` 作为额外服务自动启动；如需关闭桌宠自启，设置 `GA_DESKTOP_PET_AUTOSTART=0`。
+- 手动启动可用 `ga pet` 启动像素桌宠。
 
 ---
 

@@ -93,11 +93,6 @@ COMMANDS = {
         "desc": "启动 desktop_pet_v2 2D 桌面宠物前端",
         "cmd": ["python", "{FRONTENDS}/desktop_pet_v2.pyw"],
     },
-    "pet3d": {
-        "help": "启动 3D 桌面宠物",
-        "desc": "启动基于 pywebview + Three.js 的 3D 桌面宠物前端",
-        "cmd": ["python", "{FRONTENDS}/desktop_pet_3d.pyw"],
-    },
     "status": {
         "help": "检查运行状态",
         "desc": "检查当前是否已有 GenericAgent 进程在运行",
@@ -177,7 +172,6 @@ def main():
               ga tui               启动终端 TUI (v1)
               ga tui2              启动终端 TUI (v2 增强版)
               ga pet               启动 2D 桌面宠物 v2
-              ga pet3d             启动 3D 桌面宠物
               ga launch            启动 webview 桌面壳
               ga list              列出所有命令
         """),

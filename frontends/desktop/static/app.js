@@ -715,14 +715,19 @@ const bridgeHost = () => BRIDGE_ORIGIN;
 async function bridgeFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
   const init = { ...opts, headers };
+  const method = (init.method || 'GET').toUpperCase();
+  if (window.ga?.bridgeToken && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    headers['X-GA-Bridge-Token'] = headers['X-GA-Bridge-Token'] || window.ga.bridgeToken;
+  }
   if (init.body && typeof init.body !== 'string') {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(init.body);
   }
   const res = await fetch(`${bridgeHost()}${path}`, init);
+  const text = await res.text();
   let data = {};
-  try { data = await res.json(); } catch (_) {}
-  if (!res.ok) throw new Error(data.error || data.message || res.statusText);
+  try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || data.message || data.raw || res.statusText);
   return data;
 }
 function t(key) { return (I18N[lang] && I18N[lang][key]) || (I18N.zh[key]) || key; }
@@ -3498,8 +3503,14 @@ async function submitInput() {
   let text = composerText('chat');
   if (!text.trim()) return;
   if (text.trim().startsWith('/')) {
-    inputEl.innerHTML = '';
-    handleSlash(text.trim());
+    try {
+      const handled = await handleSlash(text.trim());
+      if (handled) inputEl.innerHTML = '';
+      else inputEl.focus();
+    } catch (e) {
+      showError(e.message || String(e));
+      inputEl.focus();
+    }
     return;
   }
   if (text.length > 20000) {
@@ -3519,16 +3530,7 @@ async function submitInput() {
     syncAskUserUi();
   }
 }
-sendBtn.addEventListener('click', (e) => {
-  e.preventDefault();
-  const sess = activeSess();
-  if (sess && rt(sess).busy) { cancelPrompt(); return; }  // 运行中：发送键是录制键 → 纯停止
-  submitInput();
-});
-inputEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submitInput(); }
-});
-// 输入框的 input/paste 监听统一在 bindComposerUpload(ctx) 里绑(chat + collab 通用)
+// 输入框按键、发送按钮和 input/paste 监听统一在 composer 绑定里处理(chat + collab 通用)
 function showSystem(text) {
   const sess = activeSess(); if (!sess) return;
   const m = { role: 'system', content: text };
@@ -3551,12 +3553,29 @@ function showToast(text) {
 async function handleSlash(cmd) {
   const name = cmd.slice(1).split(/\s+/)[0];
   switch (name) {
-    case 'help': showSystem(t('slash.help')); break;
-    case 'new': await newSession(); break;
-    case 'clear': { const s = activeSess(); if (s) { s.messages = []; renderAllMessages(s); } break; }
-    case 'stop': if (await cancelPrompt()) showSystem(t('sys.stopRequested')); break;
-    case 'settings': openSettings(); break;
-    default: showSystem(t('slash.unknown') + ': /' + name);
+    case 'help':
+      showSystem(t('slash.help'));
+      return true;
+    case 'new':
+      await newSession();
+      return true;
+    case 'clear': {
+      const s = activeSess();
+      if (s) { s.messages = []; renderAllMessages(s); }
+      return true;
+    }
+    case 'stop':
+      if (await cancelPrompt()) {
+        showSystem(t('sys.stopRequested'));
+        return true;
+      }
+      return false;
+    case 'settings':
+      openSettings();
+      return true;
+    default:
+      showSystem(t('slash.unknown') + ': /' + name);
+      return false;
   }
 }
 // 预设卡：按 data-preset 解耦（与翻译后的标题无关）
@@ -4267,10 +4286,7 @@ function removePendingFile(sid, { stripPlaceholder = false } = {}) {
   if (stripPlaceholder) removePlaceholderFromComposer(removed);
   renderThumbStrip(fileCtx(removed));
   if (removed.path) {
-    fetch(`${BRIDGE_ORIGIN}/upload`, {
-      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: removed.path }),
-    }).catch(() => {});
+    bridgeFetch('/upload', { method: 'DELETE', body: { path: removed.path } }).catch(() => {});
   }
 }
 // #1 对账:DOM 里 chip 没了(被原子删除/退格整块删)→ 同步移除附件 + 删磁盘文件
@@ -4284,12 +4300,10 @@ function reconcilePendingFiles(ctx = activeFileComposer) {
 }
 
 async function uploadOne(name, dataUrl, sid) {
-  const res = await fetch(`${BRIDGE_ORIGIN}/upload`, {
+  const j = await bridgeFetch('/upload', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, dataUrl, sid: sid || '' }),
+    body: { name, dataUrl, sid: sid || '' },
   });
-  const j = await res.json();
   if (!j.ok) throw new Error(j.error || 'upload failed');
   return j.path;
 }
@@ -4359,11 +4373,7 @@ function handleThumbStripClick(e, ctx) {
       removePlaceholderFromComposer(removed);
       renderThumbStrip(ctx);
       if (removed.path) {
-        fetch(`${BRIDGE_ORIGIN}/upload`, {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: removed.path }),
-        }).catch(() => {});
+        bridgeFetch('/upload', { method: 'DELETE', body: { path: removed.path } }).catch(() => {});
       }
     }
     return;
@@ -5067,12 +5077,10 @@ async function openUploadFile(path, name) {
   // 本地：bridge 与你同机，调系统默认程序打开 / 在文件夹显示
   const mode = isPreviewableByName(name || path) ? 'open' : 'reveal';
   try {
-    const res = await fetch(`${BRIDGE_ORIGIN}/path/open`, {
+    const j = await bridgeFetch('/path/open', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ kind: 'upload', path, mode }),
+      body: { kind: 'upload', path, mode },
     });
-    const j = await res.json();
     if (!j.ok) throw new Error(j.error || 'open failed');
   } catch (e) {
     showChanToast(t('file.openFailed'), e.message || String(e), 'err');
@@ -5794,7 +5802,7 @@ function bindComposerInRoot(root, opts) {
     else closeMenu();
   }
 
-  function doSend() { opts.onSend?.(); }
+  function doSend(meta = {}) { opts.onSend?.(meta); }
 
   plusBtn?.addEventListener('click', (e) => {
     e.preventDefault();
@@ -5819,13 +5827,13 @@ function bindComposerInRoot(root, opts) {
   input?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
-      doSend();
+      doSend({ source: 'keyboard', event: e });
     }
   });
 
   sendBtn?.addEventListener('click', (e) => {
     e.preventDefault();
-    doSend();
+    doSend({ source: 'button', event: e });
   });
 
   opts.afterBind?.(root, { input, closeMenu, doSend });
@@ -5837,9 +5845,9 @@ function bindComposerInRoot(root, opts) {
   const root = document.getElementById('chat-composer');
   const bound = bindComposerInRoot(root, {
     ctx: 'chat',
-    onSend() {
+    onSend(meta = {}) {
       const sess = activeSess();
-      if (sess && rt(sess).busy) { cancelPrompt(); return; }
+      if (meta.source === 'button' && sess && rt(sess).busy) { cancelPrompt(); return; }
       submitInput();
     },
   });
