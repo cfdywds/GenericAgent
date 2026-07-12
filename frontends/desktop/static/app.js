@@ -416,7 +416,7 @@ const I18N = {
     'chat.interrupting': '正在停止上一轮…',
     'chat.sessionLoading': '正在加载会话…',
     'sys.stopRequested': '已请求停止',
-    'slash.help': '可用命令：\n/new 新会话  /clear 清屏  /stop 停止  /settings 设置',
+    'slash.help': '可用命令：\n/new 新会话  /clear 清屏  /stop 停止  /settings 设置  /privacy 隐私监控台',
     'slash.unknown': '未知命令',
     'upload.hint': '上传文件：选择 / 拖拽 / 粘贴',
     'upload.button': '上传文件',
@@ -589,7 +589,7 @@ const I18N = {
     'chat.interrupting': 'Stopping previous reply…',
     'chat.sessionLoading': 'Loading conversation…',
     'sys.stopRequested': 'Stop requested',
-    'slash.help': 'Commands:\n/new new chat  /clear clear  /stop stop  /settings settings',
+    'slash.help': 'Commands:\n/new new chat  /clear clear  /stop stop  /settings settings  /privacy monitor',
     'slash.unknown': 'Unknown command',
     'upload.hint': 'Upload file: pick / drag / paste',
     'upload.button': 'Upload file',
@@ -3572,6 +3572,11 @@ async function handleSlash(cmd) {
       return false;
     case 'settings':
       openSettings();
+      return true;
+    case 'privacy':
+      // 后端命令(privacy_guard 插件在 agentmain._handle_slash_cmd 层处理),
+      // 原样转发给 bridge, 由后端返回结果消息
+      await sendPrompt(cmd);
       return true;
     default:
       showSystem(t('slash.unknown') + ': /' + name);
