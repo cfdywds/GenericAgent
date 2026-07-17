@@ -69,7 +69,7 @@
     "description": "当需要用户决策、提供额外信息或遇到无法自动解决的阻碍时，调用此工具中断任务并提问。多题时应一次调用",
     "parameters": {"type": "object", "properties": {
       "question": {"type": "string", "description": "多题时每题*独占*一行（带选项）"},
-      "candidates": {"type": "array", "items": {"type": "string"}, "description": "仅单题时可用。多题时留空"}}}
+      "candidates": {"type": "array", "items": {"type": "string"}, "description": "仅限单一、无歧义问题。单一确认或操作决策时必须提供能明确表达结果的候选项（例如“按方案修复”“暂不修复”）；多题或开放式回答时留空。"}}}
   }},
   {"type": "function", "function": {
     "name": "start_long_term_update",

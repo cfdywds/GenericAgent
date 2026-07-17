@@ -918,6 +918,81 @@ class GenericAgentHandler(BaseHandler):
             return StepOutcome({"reason": "EMPTY_RESPONSE_RETRY_EXHAUSTED", "attempts": self._empty_ct}, should_exit=True)
         return StepOutcome({}, next_prompt=prompt)
 
+    def _is_plan_deferred_completion(self, visible_content):
+        """Allow a completed scoped task to wait for a user decision without looping."""
+        visible = (visible_content or "").strip()
+        if not visible or self._has_incomplete_work_signal(visible):
+            return False
+        completed = re.search(
+            r"(任务(已)?完成|全部完成|已完成所有|已完成当前任务|当前任务已完成|"
+            r"修复完成|处理完成|已全部完成|完成了|搞定了)",
+            visible,
+            re.IGNORECASE,
+        )
+        awaiting_decision = re.search(
+            r"(?:请|等待|待|需要).{0,24}(?:用户|你|确认|批准|选择|回复)|"
+            r"(?:确认|批准|选择|回复).{0,24}(?:后|再|才能)|"
+            r"(?:Phase|阶段).{0,24}(?:确认|批准|选择)",
+            visible,
+            re.IGNORECASE,
+        )
+        return bool(completed and awaiting_decision)
+
+    def _is_verified_plan_completion(self, visible_content):
+        """End a verified scoped task even when its broader plan has later phases."""
+        visible = (visible_content or "").strip()
+        if not visible or self._has_incomplete_work_signal(visible):
+            return False
+        completed = re.search(
+            r"(任务(已)?完成|全部完成|已完成所有|已完成当前任务|当前任务已完成|"
+            r"修复完成|处理完成|已全部完成|完成了|搞定了)",
+            visible,
+            re.IGNORECASE,
+        )
+        verified = re.search(
+            r"(?:VERIFY|VERDICT)\s*[:：-]?\s*PASS|验证(?:通过|成功)|"
+            r"测试(?:全部|均)?通过",
+            visible,
+            re.IGNORECASE,
+        )
+        return bool(completed and verified)
+
+    def _has_recent_plan_verification(self):
+        recent = "\n".join(self.history_info[-8:]) if self.history_info else ""
+        return bool(re.search(
+            r"(?:VERIFY|VERDICT)\s*[:：-]?\s*PASS|验证(?:通过|成功)|"
+            r"测试(?:全部|均)?通过",
+            recent,
+            re.IGNORECASE,
+        ))
+
+    def _strip_courtesy_continue(self, visible):
+        """Drop polite closers like '有问题可以继续提问' so they don't block finish."""
+        text = visible or ""
+        return re.sub(
+            r"(?:如有|如果有|还有|若有)?(?:问题|疑问)?(?:的话)?(?:可以|可|请)?继续(?:提问|询问|问我|找我)|"
+            r"(?:随时|欢迎)(?:继续)?(?:提问|询问|问我)|"
+            r"(?:有需要|需要的话)(?:可以|可)?继续(?:说|问|找我)",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+    def _has_incomplete_work_signal(self, visible_content):
+        """True when the reply still announces more agent-side work to do."""
+        visible = self._strip_courtesy_continue(visible_content or "")
+        if not visible.strip():
+            return False
+        incomplete_re = re.compile(
+            r"(下一步|接下来|还需要|尚未|待办|TODO|TBD|正在|准备|"
+            r"先(?:做|改|查|读|写)|然后|稍后|未完成|incomplete|in progress|"
+            # bare 继续 / 继续排查/优化/分析/观察... but courtesy 继续提问 already stripped
+            r"继续(?!提问|询问|问我|找我)|"
+            r"will (?:now|next)|let me|I'll |I will )",
+            re.IGNORECASE,
+        )
+        return bool(incomplete_re.search(visible))
+
     def _looks_like_final_no_tool_answer(self, visible_content):
         """Decide whether a no-tool turn may end the whole agent run.
 
@@ -935,20 +1010,15 @@ class GenericAgentHandler(BaseHandler):
                 return False
             return remaining == 0
 
+        if self._has_incomplete_work_signal(visible):
+            return False
+
         complete_re = re.compile(
             r"(任务(已)?完成|全部完成|已完成所有|已完成当前任务|当前任务已完成|"
             r"修复完成|处理完成|已全部完成|FINISHED|TASK[_\s-]?DONE|"
             r"All done|Done\.|完成了|搞定了|🏁)",
             re.IGNORECASE,
         )
-        incomplete_re = re.compile(
-            r"(下一步|接下来|继续|还需要|尚未|待办|TODO|TBD|正在|准备|"
-            r"先(?:做|改|查|读|写)|然后|稍后|未完成|incomplete|in progress|"
-            r"will (?:now|next)|let me|I'll |I will )",
-            re.IGNORECASE,
-        )
-        if incomplete_re.search(visible):
-            return False
         if complete_re.search(visible):
             return True
 
@@ -980,7 +1050,7 @@ class GenericAgentHandler(BaseHandler):
         if 'max_tokens !!!]' in content[-100:]:
             return self._retry_or_exit("[System] max_tokens limit reached. Use multi small steps to do it.")
         
-        if self._in_plan_mode() and any(kw in content for kw in ['任务完成', '全部完成', '已完成所有', '🏁']):
+        if self._in_plan_mode() and self._check_plan_completion() == 0 and any(kw in content for kw in ['任务完成', '全部完成', '已完成所有', '🏁']) and not (self._is_verified_plan_completion(visible_content) or self._has_recent_plan_verification()):
             if 'VERDICT' not in content and '[VERIFY]' not in content and '验证subagent' not in content:
                 yield "[Warn] Plan模式完成声明拦截。\n"
                 return StepOutcome({}, next_prompt="⛔ [验证拦截] 检测到你在plan模式下声称完成，但未执行[VERIFY]验证步骤。请先按plan_sop §四启动验证subagent，获得VERDICT后才能声称完成。")
@@ -1011,8 +1081,15 @@ class GenericAgentHandler(BaseHandler):
         if self._in_plan_mode():
             remaining = self._check_plan_completion()
             if remaining == 0:
+                verified = self._is_verified_plan_completion(visible_content) or self._has_recent_plan_verification()
                 self._exit_plan_mode(); yield "[Info] Plan完成：plan.md中0个[ ]残留，退出plan模式。\n"
+                if verified:
+                    yield "[Info] Recent plan verification passed; finalizing without another no-tool turn.\n"
+                    return StepOutcome(response, next_prompt=None)
             elif remaining is not None and remaining > 0:
+                if self._is_plan_deferred_completion(visible_content) or self._is_verified_plan_completion(visible_content):
+                    yield "[Info] Scoped plan task completed; preserving remaining plan steps for a later user instruction.\n"
+                    return StepOutcome(response, next_prompt=None)
                 yield "[Info] Plan still has open tasks; continue instead of finalizing no-tool turn.\n"
                 next_prompt = (
                     f"[System] 当前仍在 plan 模式，plan 中还有 {remaining} 个未完成项 [ ]。"

@@ -1482,18 +1482,19 @@ function markAskOptionHtml(html) {
   return out;
 }
 
-/** true = always expose structured candidates as direct reply actions. */
-const ASK_USER_ALWAYS_SHOW_CHOICES = false;
-
 /** Do not flatten ambiguous multi-question candidates into one action group. */
 function shouldOfferAskChoices(item) {
   if (!item || !item.candidates.length) return false;
-  if (ASK_USER_ALWAYS_SHOW_CHOICES) return true;
   const q = item.question;
   if (/两个问题|多个问题|两道|两题/.test(q)) return false;
   if ((q.match(/问题\s*\d/gi) || []).length >= 2) return false;
-  if ((q.match(/^[ \t]*\d+[.、:：)]\s+/gm) || []).length >= 2) return false;
   if ((q.match(/^[ \t]*[A-Da-d][.)]\s/mg) || []).length >= 2) return false;
+  const questionCount = (q.match(/[？?]/g) || []).length;
+  if (questionCount >= 2) return false;
+  if (questionCount === 0) {
+    const numbered = q.match(/^[ \t]*(?:[（(]\s*\d+\s*[）)]|\d+\s*[.)）、:：]|[一二三四五六七八九十]+\s*[、.．]|问题\s*\d+)/gm) || [];
+    if (numbered.length >= 2) return false;
+  }
   const comboN = item.candidates.filter(c => /\d+[A-Da-d]\s*\+\s*\d+[A-Da-d]/i.test(c)).length;
   if (comboN >= Math.max(1, Math.ceil(item.candidates.length * 0.5))) return false;
   // 题干里有多道问句，却把全部选项平铺在 candidates → 无法区分归属，不展示
@@ -1507,7 +1508,7 @@ function renderAskUserNotice(data, { showImages = false } = {}) {
   const item = normalizeAskUserData(data);
   if (!item) return '';
   const qHtml = markAskOptionHtml(renderMarkdown(formatAskUserQuestion(item.question)));
-  const hint = askUserActionChoices(item).length ? t('ask.replyHintChoices') : t('ask.replyHint');
+  const hint = askUserActionChoices(item).length ? askUserChoiceHint() : t('ask.replyHint');
   return `<div class="ask-user-notice" data-ask-user="1">
     <div class="ask-user-banner">
       <span class="ask-user-banner-text">${escapeHtml(t('ask.banner'))}</span>
@@ -1523,18 +1524,16 @@ function renderAskUserNotice(data, { showImages = false } = {}) {
   </div>`;
 }
 
-const ASK_USER_CONFIRMATION_RE = /(?:是否|请确认|要不要|可否|能否|确认(?:是否|执行|继续|应用|修改|修复)|(?:continue|proceed|confirm|approve|apply|execute)\b)/i;
+function askUserChoiceHint() {
+  const hint = t('ask.replyHintChoices');
+  if (hint !== 'ask.replyHintChoices') return hint;
+  return lang === 'en' ? 'Choose an action below or reply directly' : '选择下方操作或直接回复';
+}
 
 function askUserActionChoices(item) {
   if (!item) return [];
   if (shouldOfferAskChoices(item)) {
     return item.candidates.map(label => ({ label, primary: false }));
-  }
-  if (!item.candidates.length && ASK_USER_CONFIRMATION_RE.test(item.question)) {
-    return [
-      { label: t('ask.confirmAction'), primary: true },
-      { label: t('ask.deferAction'), primary: false },
-    ];
   }
   return [];
 }
@@ -1637,8 +1636,7 @@ function renderPendingAskUserCard(item) {
       button.addEventListener('click', () => {
         const sess = activeSess();
         if (!sess || !inputEl || _submitInFlight || rt(sess).busy) return;
-        inputEl.textContent = choice.label;
-        void submitInput();
+        void submitInput({ replyText: choice.label });
       });
       actions.appendChild(button);
     }
@@ -3477,11 +3475,11 @@ async function cancelPrompt() {
 }
 
 /* ═══════════════ 输入区 / slash / 预设 ═══════════════ */
-async function submitInput() {
+async function submitInput({ replyText = null } = {}) {
   if (_submitInFlight) return;
-  let text = composerText('chat');
+  let text = replyText == null ? composerText('chat') : String(replyText);
   if (!text.trim()) return;
-  if (text.trim().startsWith('/')) {
+  if (replyText == null && text.trim().startsWith('/')) {
     try {
       const handled = await handleSlash(text.trim());
       if (handled) inputEl.innerHTML = '';

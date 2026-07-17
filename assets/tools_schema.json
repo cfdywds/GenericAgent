@@ -69,7 +69,7 @@
     "description": "Interrupt task to ask user when needing decisions, extra info, or facing unresolvable blockers. Multiple questions should in one call",
     "parameters": {"type": "object", "properties": {
       "question": {"type": "string", "description": "For multiple questions, one per line (contain candidates)"},
-      "candidates": {"type": "array", "items": {"type": "string"}, "description": "Optional quick-select choices for a single question only. Leave empty for multi-questions"}}}
+      "candidates": {"type": "array", "items": {"type": "string"}, "description": "Optional quick-select choices for a single, unambiguous question only. For a single confirmation or action decision, always supply concrete candidates that state the outcome (for example, 'Apply the fix' and 'Do not apply'). Leave empty for multi-questions or open-ended input."}}}
   }},
   {"type": "function", "function": {
     "name": "start_long_term_update",

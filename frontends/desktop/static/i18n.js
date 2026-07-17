@@ -195,8 +195,6 @@
     'ask.placeholderOpen': '在此输入你的回答… (Enter 发送)',
     'ask.placeholderChoice': '选择下方操作，或输入其他回复… (Enter 发送)',
     'ask.actionsLabel': '可选操作',
-    'ask.confirmAction': '确认执行',
-    'ask.deferAction': '暂不执行',
   },
   en: {
     'app.title': 'GenericAgent Desktop',
@@ -393,8 +391,6 @@
     'ask.placeholderOpen': 'Type your answer here… (Enter to send)',
     'ask.placeholderChoice': 'Choose an action below, or enter another reply… (Enter to send)',
     'ask.actionsLabel': 'Available actions',
-    'ask.confirmAction': 'Confirm and proceed',
-    'ask.deferAction': 'Not now',
   },
 };
 
