@@ -389,29 +389,95 @@ def _send_text_chunks(bot, uid, text, context_token='', limit=3000, max_chunks=1
     return len(chunks)
 
 def _font_candidates():
+    """Prefer single-file CJK TTF first; TTC needs explicit face index."""
     if os.name == 'nt':
-        windir = os.environ.get('WINDIR', r'C:\\Windows')
+        windir = os.environ.get('WINDIR') or os.environ.get('SystemRoot') or r'C:\Windows'
+        fonts = os.path.join(windir, 'Fonts')
         return [
-            os.path.join(windir, 'Fonts', 'msyh.ttc'),
-            os.path.join(windir, 'Fonts', 'simhei.ttf'),
-            os.path.join(windir, 'Fonts', 'simsun.ttc'),
+            # (path, index) — index only for TTC/OTC collections
+            (os.path.join(fonts, 'simhei.ttf'), None),
+            (os.path.join(fonts, 'msyh.ttc'), 0),
+            (os.path.join(fonts, 'msyhbd.ttc'), 0),
+            (os.path.join(fonts, 'msyhl.ttc'), 0),
+            (os.path.join(fonts, 'simsun.ttc'), 0),
+            (os.path.join(fonts, 'Deng.ttf'), None),
+            (os.path.join(fonts, 'msjh.ttc'), 0),
         ]
     return [
-        '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
-        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        ('/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc', 0),
+        ('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 0),
+        ('/usr/share/fonts/truetype/wqy/wqy-microhei.ttc', 0),
+        ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', None),
     ]
 
 
 def _load_render_font(size=26):
+    """Load a CJK-capable font; never silently fall back to tiny default if CJK fonts exist."""
     try:
         from PIL import ImageFont
-        for fp in _font_candidates():
-            if fp and os.path.isfile(fp):
+    except Exception:
+        return None
+    last_err = None
+    for fp, index in _font_candidates():
+        if not fp or not os.path.isfile(fp):
+            continue
+        try:
+            if index is None:
                 return ImageFont.truetype(fp, size=size)
+            return ImageFont.truetype(fp, size=size, index=index)
+        except Exception as e:
+            last_err = e
+            continue
+    print(f'[WX Subscriber] CJK font load failed, last={last_err}', file=sys.__stdout__)
+    try:
+        from PIL import ImageFont
         return ImageFont.load_default()
     except Exception:
         return None
+
+
+_EMOJI_LABELS = {
+    '📱': '[手机]', '⏱': '[运行]', '💾': '[内存]', '✅': '[OK]', '❌': '[X]',
+    '⚠️': '[!]', '⚠': '[!]', '📌': '[注]', '🟡': '[警告]', '🟢': '[正常]',
+    '🔴': '[严重]', '🔵': '[信息]', '⚡': '[负载]', '📂': '[磁盘]', '🖥️': '[主机]',
+    '🖥': '[主机]', '📊': '[状态]', '🔧': '[服务]', '🌐': '[网络]', '🔥': '[热]',
+}
+
+
+def _sanitize_for_image(text):
+    """Strip emoji / pictographs so CJK fonts never show tofu boxes as 乱码.
+
+    Prefer pure strip over label replacement: report template already has Chinese
+    status words (正常/警告/异常), so labels like [警告] would double up.
+    """
+    if not text:
+        return ''
+    s = str(text).replace('\t', '    ')
+    # drop known emoji tokens entirely (multi-char first)
+    for k in sorted(_EMOJI_LABELS.keys(), key=len, reverse=True):
+        s = s.replace(k, '')
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch in ('\ufe0f', '\u200d', '\u20e3'):  # VS16 / ZWJ / keycap
+            continue
+        # emoji & misc symbols ranges that CJK fonts often lack
+        if (
+            0x1F000 <= o <= 0x1FAFF
+            or 0x2600 <= o <= 0x27BF
+            or 0x2300 <= o <= 0x23FF
+            or 0x2B00 <= o <= 0x2BFF
+            or 0xFE00 <= o <= 0xFE0F
+            or 0x1F900 <= o <= 0x1F9FF
+        ):
+            continue
+        out.append(ch)
+    # collapse leftover multi-spaces from emoji removal, keep newlines
+    import re as _re
+    s2 = ''.join(out)
+    s2 = _re.sub(r'[ \t]{2,}', ' ', s2)
+    s2 = _re.sub(r' *\n *', '\n', s2)
+    return s2.strip()
 
 
 def _text_width(draw, text, font):
@@ -441,41 +507,55 @@ def _wrap_for_image(text, draw, font, max_width):
     return wrapped
 
 
-def _render_text_images(text, prefix='scheduled_task'):
-    """Render scheduler report text into one or more PNG screenshots."""
+def _render_text_images(text, prefix='scheduled_task', max_pages=None):
+    """Render scheduler report text into one or more PNG cards (preserves newlines)."""
     try:
         from PIL import Image, ImageDraw
     except Exception as e:
         print(f'[WX Subscriber] PIL unavailable for render: {type(e).__name__}: {e}', file=sys.__stdout__)
         return []
 
+    text = _sanitize_for_image(text)
     os.makedirs(_SCHED_RENDER_DIR, exist_ok=True)
     safe = re.sub(r'[^0-9A-Za-z_.-]+', '_', prefix or 'scheduled_task')[:80]
     stamp = time.strftime('%Y%m%d_%H%M%S')
-    width, max_height = 1080, 2200
-    margin_x, margin_y = 56, 50
-    bg, fg = (255, 255, 255), (28, 32, 36)
-    font = _load_render_font(26)
-    title_font = _load_render_font(32)
+    page_cap = _SCHED_IMAGE_MAX_PAGES if max_pages is None else max(1, int(max_pages))
+    # Compact card for short status; taller canvas for long reports
+    raw_lines = [ln.rstrip() for ln in (text or '').splitlines()]
+    short_card = sum(1 for ln in raw_lines if ln.strip()) <= 12 and len(text or '') <= 900
+    width = 900 if short_card else 1080
+    max_height = 1600 if short_card else 2200
+    margin_x, margin_y = (48, 40) if short_card else (56, 50)
+    bg, fg = (248, 249, 251), (28, 32, 36)
+    accent = (37, 99, 235)  # blue bar
+    font = _load_render_font(30 if short_card else 26)
+    title_font = _load_render_font(28 if short_card else 32)
+    if font is None:
+        print('[WX Subscriber] no font available for render', file=sys.__stdout__)
+        return []
     probe = Image.new('RGB', (width, 200), bg)
     draw = ImageDraw.Draw(probe)
-    max_text_width = width - margin_x * 2
+    max_text_width = width - margin_x * 2 - 12
     lines = _wrap_for_image(text, draw, font, max_text_width)
-    line_h = 38
-    header_h = 18
-    lines_per_page = max(10, (max_height - margin_y * 2 - header_h) // line_h)
+    line_h = 46 if short_card else 38
+    header_h = 36 if short_card else 18
+    lines_per_page = max(8, (max_height - margin_y * 2 - header_h) // line_h)
     paths = []
     total_pages = max(1, math.ceil(len(lines) / lines_per_page))
-    total_pages = min(total_pages, _SCHED_IMAGE_MAX_PAGES)
+    total_pages = min(total_pages, page_cap)
     for page in range(total_pages):
         page_lines = lines[page * lines_per_page:(page + 1) * lines_per_page]
         truncated = page == total_pages - 1 and (page + 1) * lines_per_page < len(lines)
         if truncated and len(page_lines) >= 2:
             page_lines = page_lines[:-2] + ['', '[内容过长，图片已截断；完整报告见本地报告文件]']
-        height = min(max_height, margin_y * 2 + header_h + max(1, len(page_lines)) * line_h + 20)
+        height = min(max_height, margin_y * 2 + header_h + max(1, len(page_lines)) * line_h + 28)
         img = Image.new('RGB', (width, height), bg)
         d = ImageDraw.Draw(img)
-        d.text((margin_x, 18), f'定时任务报告截图 {page + 1}/{total_pages}', fill=(90, 96, 104), font=title_font)
+        # left accent + soft header
+        d.rectangle([0, 0, 10, height], fill=accent)
+        d.rectangle([0, 0, width, 8], fill=accent)
+        header = f'定时任务 · {page + 1}/{total_pages}' if total_pages > 1 else '定时任务'
+        d.text((margin_x, 16), header, fill=(90, 96, 104), font=title_font or font)
         y = margin_y + header_h
         for line in page_lines:
             d.text((margin_x, y), line, fill=fg, font=font)
@@ -491,30 +571,37 @@ def _summarize_for_sched_push(tid, report_path, body):
     head = text[:_SCHED_SUMMARY_LIMIT].rstrip()
     if len(text) > _SCHED_SUMMARY_LIMIT:
         head += '\n\n[报告较长，完整内容见随后截图或本地报告文件]'
-    return f'[定时任务] {tid}\n[状态] 完成\n[报告路径] {report_path or ""}\n[推送模式] 智能：短报告文字，长报告摘要+截图\n\n{head}'
+    return f'[定时任务] {tid}\n[状态] 完成\n[报告路径] {report_path or ""}\n[推送模式] 图片卡片\n\n{head}'
 
 
 def _push_completed_smart(bot, uid, ctx, tid, report_path, body):
+    """Prefer formatted image cards so WeChat keeps layout; then text the report path."""
     body = (body or '').strip()
     full_msg = f'[定时任务] {tid}\n[状态] 完成\n\n{body}'
-    if len(full_msg) <= _SCHED_TEXT_ONLY_LIMIT:
-        return _send_text_chunks(bot, uid, full_msg, context_token=ctx)
-
-    sent = _send_text_chunks(bot, uid, _summarize_for_sched_push(tid, report_path, body), context_token=ctx, max_chunks=2)
-    image_text = f'[定时任务] {tid}\n[状态] 完成\n[报告路径] {report_path or ""}\n\n{body}'
-    image_paths = _render_text_images(image_text, prefix=tid)
-    if not image_paths:
-        sent += _send_text_chunks(bot, uid, full_msg, context_token=ctx)
-        return sent
-    try:
-        for img in image_paths:
-            bot.send_image(uid, img, context_token=ctx)
-            sent += 1
-            time.sleep(0.8)
-    except Exception as e:
-        print(f'[WX Subscriber] image push failed, fallback text: {type(e).__name__}: {e}', file=sys.__stdout__)
-        sent += _send_text_chunks(bot, uid, full_msg, context_token=ctx)
-    return sent
+    # Prefer image-first: plain WeChat text collapses newlines/emoji and looks unformatted.
+    image_text = f'{tid}\n\n{body}' if body else f'{tid}\n完成'
+    # Short pure-status cards still 1 page; richer cards (services list) allow up to 2.
+    short = len(body) <= 500 and body.count('\n') <= 10
+    medium = len(body) <= 1600 and body.count('\n') <= 40
+    image_paths = _render_text_images(
+        image_text, prefix=tid, max_pages=1 if short else (2 if medium else None)
+    )
+    if image_paths:
+        sent = 0
+        try:
+            for img in image_paths:
+                bot.send_image(uid, img, context_token=ctx)
+                sent += 1
+                time.sleep(0.8)
+            # After images: send path so users can open the full local report when cards truncate.
+            if report_path:
+                path_msg = f'[定时任务] {tid}\n[状态] 完成\n[报告路径] {report_path}'
+                sent += _send_text_chunks(bot, uid, path_msg, context_token=ctx, max_chunks=1)
+            return sent
+        except Exception as e:
+            print(f'[WX Subscriber] image push failed, fallback text: {type(e).__name__}: {e}', file=sys.__stdout__)
+    # Fallback pure text only if render/send image failed
+    return _send_text_chunks(bot, uid, full_msg, context_token=ctx)
 
 
 def _read_file_if_exists(path):
@@ -576,7 +663,28 @@ class WeChatTaskSubscriber:
         except Exception as e:
             print(f'[WX Subscriber] poll error: {type(e).__name__}: {e}', file=sys.__stdout__)
         self._save_offset()
-        return events
+        # 重连/积压时只保留每个 task 最新一条，避免把历史图卡全部补发
+        return self._collapse_latest_per_task(events)
+
+    @staticmethod
+    def _collapse_latest_per_task(events):
+        """同一 task_id 只保留队列中最后一条（最近一次），丢弃历史补发。"""
+        if len(events) <= 1:
+            return events
+        latest = {}
+        order = []
+        for ev in events:
+            tid = ev.get('task_id') or 'scheduled_task'
+            if tid not in latest:
+                order.append(tid)
+            latest[tid] = ev
+        collapsed = [latest[t] for t in order]
+        skipped = len(events) - len(collapsed)
+        if skipped > 0:
+            print(f'[WX Subscriber] backlog collapse: {len(events)} -> {len(collapsed)} '
+                  f'(skip {skipped} older events, keep latest per task)',
+                  file=sys.__stdout__)
+        return collapsed
 
     def should_handle(self, event):
         return event.get('event_type') in ('task_completed', 'task_failed')

@@ -112,6 +112,24 @@ def has_user_visible_text(text: Any) -> bool:
     return bool(strip_non_user_visible_text(text))
 
 
+
+def describe_non_final_exit(exit_reason: Any) -> Optional[str]:
+    if not isinstance(exit_reason, dict):
+        return None
+    result = str(exit_reason.get("result") or "")
+    data = exit_reason.get("data")
+    if result == "MAX_TURNS_EXCEEDED":
+        return "任务已暂停：已达到本次 180 轮执行上限。上下文和已完成进度已保留，请发送“继续”后再试。"
+    if result == "ABORTED":
+        return "任务已暂停：执行器收到外部停止信号。上下文和已完成进度已保留，请发送“继续”后再试。"
+    if result == "CURRENT_TASK_DONE":
+        return "执行已结束，但未生成面向用户的说明。工具轨迹和上下文已保留，请发送“继续”要求完成后续工作。"
+    if result == "EXITED" and isinstance(data, dict) and data.get("reason") == "EMPTY_RESPONSE_RETRY_EXHAUSTED":
+        attempts = data.get("attempts") or 3
+        return f"任务已暂停：模型连续 {attempts} 次未返回可用回复。上下文和已完成进度已保留，请发送“继续”重试。"
+    return None
+
+
 def normalize_final_turn_segs(full: str, outputs: Any) -> Optional[List[str]]:
     if not outputs or not isinstance(outputs, (list, tuple)):
         return None
@@ -149,12 +167,13 @@ class Session:
     messages: List[dict] = field(default_factory=list)
     msg_seq: int = 0
     partial: Optional[dict] = None
-    status: str = "idle"  # idle|running|error|cancelled
+    status: str = "idle"  # idle|running|awaiting_input|error|cancelled
     agent: Any = None
     thread: Optional[threading.Thread] = None
     cancel_requested: bool = False
     active_turn_id: str = ""
     last_error: str = ""
+    pending_input: Optional[dict] = None
     pinned: bool = False
     untitled: bool = True
     plan_scan_baseline: int = 0
@@ -182,6 +201,82 @@ def _sanitize_desktop_plan_path(session_id: str, plan_path: str) -> str:
     if plan_state.is_plan_mode_path(p):
         return p.lstrip("./\\")
     return ""
+
+
+def extract_ask_user_interrupt(ctx: Any) -> Optional[dict]:
+    """Return the structured ask_user payload carried by a completed agent turn."""
+    exit_reason = (ctx or {}).get("exit_reason") or {}
+    if exit_reason.get("result") != "EXITED":
+        return None
+    payload = exit_reason.get("data") or {}
+    if payload.get("status") != "INTERRUPT" or payload.get("intent") != "HUMAN_INTERVENTION":
+        return None
+    data = payload.get("data") or {}
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return None
+    candidates = data.get("candidates") or []
+    if not isinstance(candidates, (list, tuple)):
+        candidates = []
+    return {
+        "question": question,
+        "candidates": [str(candidate) for candidate in candidates if str(candidate).strip()],
+    }
+
+
+_ASK_USER_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_ASK_USER_IMAGE_PATH_RE = re.compile(
+    r"(?ix)(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|temp[\\/]|/(?!/))[^\r\n<>:\"|?*]*?"
+    r"\.(?:png|jpe?g|gif|webp|bmp)"
+)
+_MAX_ASK_USER_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def _ask_user_image_sources(question: str, ga_root: Path) -> List[Path]:
+    """Find QR-like local image paths without allowing arbitrary local files."""
+    permitted_roots = ((ga_root / "temp").resolve(), (Path.home() / ".wxbot").resolve())
+    images: List[Path] = []
+    seen: Set[Path] = set()
+    for match in _ASK_USER_IMAGE_PATH_RE.finditer(question or ""):
+        try:
+            left_token = re.search(r"\S+$", (question or "")[:match.start()])
+            right_token = re.match(r"\S*", (question or "")[match.end():])
+            token = (left_token.group(0) if left_token else "") + match.group(0)
+            token += right_token.group(0) if right_token else ""
+            if "://" in token:
+                continue
+            source = Path(match.group(0).strip().strip("'\"`，。；;）)】]"))
+            source = source.expanduser().resolve()
+            if source in seen or source.suffix.lower() not in _ASK_USER_IMAGE_EXTENSIONS:
+                continue
+            if not any(source.is_relative_to(root) for root in permitted_roots):
+                continue
+            if not source.is_file() or source.stat().st_size > _MAX_ASK_USER_IMAGE_BYTES:
+                continue
+        except (OSError, ValueError):
+            continue
+        seen.add(source)
+        images.append(source)
+    return images
+
+
+def attach_ask_user_images(payload: dict, ga_root: Path, upload_dir: Path) -> dict:
+    """Copy permitted local images into the bridge's session-scoped upload directory."""
+    result = dict(payload)
+    if result.get("images"):
+        return result
+    images = []
+    for source in _ask_user_image_sources(result.get("question", ""), ga_root):
+        target = upload_dir / f"{uuid.uuid4().hex[:12]}__{source.name}"
+        try:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        except OSError:
+            continue
+        images.append({"name": source.name, "path": str(target)})
+    if images:
+        result["images"] = images
+    return result
 
 
 class AgentManager:
@@ -215,6 +310,7 @@ class AgentManager:
                 "plan_scan_baseline": s.plan_scan_baseline,
                 "plan_path": s.plan_path or "",
                 "llm_no": s.llm_no,
+                "pending_input": s.pending_input,
                 "llm_history": llm_hist}
 
     def _session_file(self, sid: str) -> Path:
@@ -250,6 +346,13 @@ class AgentManager:
 
     def _session_from_item(self, item: dict) -> "Session":
         msgs = item.get("messages", [])
+        pending_input = item.get("pending_input") or None
+        if isinstance(pending_input, dict):
+            pending_input = attach_ask_user_images(
+                pending_input,
+                Path(self.ga_root),
+                _session_upload_dir(item["id"]),
+            )
         return Session(id=item["id"], title=item.get("title", "New chat"),
                        cwd=item.get("cwd", self.ga_root),
                        created_at=item.get("created_at", time.time()),
@@ -260,7 +363,8 @@ class AgentManager:
                        untitled=item.get("untitled", True),
                        plan_scan_baseline=_load_plan_baseline(item, msgs),
                        plan_path=_sanitize_desktop_plan_path(item["id"], item.get("plan_path") or ""),
-                       status="idle", agent=None,
+                       status="awaiting_input" if pending_input else "idle", agent=None,
+                       pending_input=pending_input,
                        llm_history=item.get("llm_history"),
                        llm_no=item.get("llm_no"))
 
@@ -555,6 +659,43 @@ class AgentManager:
             with contextlib.suppress(Exception):
                 os.chdir(old_cwd)
 
+    def _restore_agent_context(self, sess: Session, agent: Any, *, omit_latest_user: bool = False):
+        """Apply persisted model and conversation state without changing session status."""
+        no = sess.llm_no if sess.llm_no is not None else _global_default_llm_no()
+        if no is not None and hasattr(agent, "next_llm"):
+            with contextlib.suppress(Exception):
+                agent.next_llm(int(no))
+
+        if sess.llm_history:
+            history = sess.llm_history
+        else:
+            messages = list(sess.messages)
+            if omit_latest_user and messages and messages[-1].get("role") == "user":
+                messages.pop()
+            history = []
+            for message in messages:
+                role = message.get("role")
+                content = message.get("content", "")
+                if role == "user":
+                    history.append({"role": "user", "content": [{"type": "text", "text": content}]})
+                elif role == "assistant":
+                    history.append({"role": "assistant", "content": [{"type": "text", "text": content}]})
+        if history:
+            try:
+                agent.llmclient.backend.history = history
+            except Exception as e:
+                print(f"[bridge] restore llm_history failed: {e}", file=sys.stderr)
+
+    def _ensure_agent(self, sess: Session, *, omit_latest_user: bool = False) -> tuple[Any, bool]:
+        """Create and restore one session Agent while holding the initialization lock."""
+        with self.lock:
+            if sess.agent is not None:
+                return sess.agent, False
+            agent = self.make_agent(sess)
+            self._restore_agent_context(sess, agent, omit_latest_user=omit_latest_user)
+            sess.agent = agent
+            return agent, True
+
     @staticmethod
     def _base_display_name(var: str, cfg: Optional[dict]) -> str:
         c = cfg or {}
@@ -700,6 +841,7 @@ class AgentManager:
             "createdAt": sess.created_at,
             "updatedAt": sess.updated_at,
             "lastError": sess.last_error,
+            "pendingInput": dict(sess.pending_input) if sess.pending_input else None,
             "msgSeq": sess.msg_seq,
             "pinned": sess.pinned,
             "untitled": sess.untitled,
@@ -770,6 +912,7 @@ class AgentManager:
                 extra["files"] = files_meta
             if image_metas:
                 extra["images"] = image_metas
+            sess.pending_input = None
             user_msg = self.add_message(sess, "user", prompt, **extra)
             turn_id = uuid.uuid4().hex
             sess.status = "running"
@@ -778,6 +921,7 @@ class AgentManager:
             sess.last_error = ""
             sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True,
                             "curr_turn": 0, "turn_segs": []}  # turn_segs[i]=第i轮全文(权威结构化,前端按轮渲染);content保留双轨兜底
+            self._persist_session(sess)
             t = threading.Thread(target=self.run_agent_turn, args=(sess, prompt, None, turn_id), daemon=True, name=f"Turn-{sid}")
             sess.thread = t
             t.start()
@@ -790,15 +934,38 @@ class AgentManager:
             with self.lock:
                 return sess.active_turn_id == turn_id, sess.cancel_requested
 
+        pending_input: Optional[dict] = None
+        exit_reason: dict = {}; backend_error = ""; backend_transcript: Optional[str] = None
+        ask_hook_key = f"desktop_ask_user_{turn_id}"
+        ask_hook = None
+        agent = None
         try:
-            if sess.agent is None:
-                sess.agent = self.make_agent(sess)
-            agent = sess.agent
-            # 模型取会话绑定 sess.llm_no,未绑定回退全局默认。切换走 set_session_model。
-            no = sess.llm_no if sess.llm_no is not None else _global_default_llm_no()
-            if no is not None and hasattr(agent, "next_llm"):
-                with contextlib.suppress(Exception):
-                    agent.next_llm(int(no))
+            # submit_prompt records the new user message before this thread starts.
+            # Restore only the preceding conversation so put_task adds it once.
+            agent, created_agent = self._ensure_agent(sess, omit_latest_user=True)
+
+            def capture_ask_user(ctx: dict):
+                nonlocal pending_input
+                payload = extract_ask_user_interrupt(ctx)
+                if payload is not None:
+                    pending_input = attach_ask_user_images(
+                        payload,
+                        Path(self.ga_root),
+                        _session_upload_dir(sess.id),
+                    )
+
+            ask_hook = capture_ask_user
+            hooks = getattr(agent, "_turn_end_hooks", None)
+            if not isinstance(hooks, dict):
+                hooks = {}
+                agent._turn_end_hooks = hooks
+            hooks[ask_hook_key] = ask_hook
+            # 已存在的 Agent 仍需在每轮应用会话模型；新 Agent 已由恢复助手配置。
+            if not created_agent:
+                no = sess.llm_no if sess.llm_no is not None else _global_default_llm_no()
+                if no is not None and hasattr(agent, "next_llm"):
+                    with contextlib.suppress(Exception):
+                        agent.next_llm(int(no))
             full = ""
             done_outputs = None  # done时agent给的全量轮文本(turn_resps.copy())
             if hasattr(agent, "put_task"):
@@ -816,6 +983,12 @@ class AgentManager:
                     except _queue.Empty:
                         continue
                     if isinstance(item, dict):
+                        if isinstance(item.get("exit_reason"), dict):
+                            exit_reason = item["exit_reason"]
+                        if item.get("error"):
+                            backend_error = str(item["error"])
+                        if "transcript" in item:
+                            backend_transcript = str(item.get("transcript") or "")
                         if item.get("next"):
                             text = str(item["next"])
                             pieces.append(text)
@@ -838,6 +1011,9 @@ class AgentManager:
                                             _segs[_idx - 1] = str(_outs[-2])
                         if "done" in item:
                             full = strip_final_info_marker(item.get("done") or "")
+                            if backend_transcript is not None:
+                                full = strip_final_info_marker(backend_transcript)
+
                             done_outputs = normalize_final_turn_segs(full, item.get("outputs"))  # done时=turn_resps.copy()全量轮
                             if done_outputs:
                                 with self.lock:
@@ -870,6 +1046,73 @@ class AgentManager:
                         sess.status = "cancelled"
                     sess.updated_at = time.time()
                 emit_session_state(sess, "cancelled")
+                return
+            if pending_input is not None:
+                with self.lock:
+                    if sess.active_turn_id != turn_id:
+                        return
+                    sess.partial = None
+                    full = strip_final_info_marker(full)
+                    final_segs = normalize_final_turn_segs(full, done_outputs)
+                    sess.pending_input = pending_input
+                    sess.status = "awaiting_input"
+                    sess.active_turn_id = ""
+                    sess.last_error = ""
+                    if final_segs:
+                        self.add_message(sess, "assistant", full, turn_segs=final_segs,
+                                         ask_user=pending_input, interrupted=True)
+                    else:
+                        self.add_message(sess, "assistant", full, ask_user=pending_input, interrupted=True)
+                    try: sess.llm_history = json.loads(json.dumps(agent.llmclient.backend.history, ensure_ascii=False, default=str))
+                    except Exception: pass
+                    self._persist_session(sess)
+                emit_session_state(sess, "awaiting_input")
+                return
+            if backend_error:
+                with self.lock:
+                    if sess.active_turn_id != turn_id:
+                        return
+                    sess.partial = None
+                    transcript = strip_final_info_marker(backend_transcript if backend_transcript is not None else full)
+                    final_segs = normalize_final_turn_segs(transcript, done_outputs)
+                    if transcript.strip():
+                        if final_segs:
+                            self.add_message(sess, "assistant", transcript, turn_segs=final_segs, interrupted=True)
+                        else:
+                            self.add_message(sess, "assistant", transcript, interrupted=True)
+                    try: sess.llm_history = json.loads(json.dumps(agent.llmclient.backend.history, ensure_ascii=False, default=str))
+                    except Exception: pass
+                    sess.status = "error"
+                    sess.active_turn_id = ""
+                    sess.last_error = f"Agent backend failed: {backend_error}"
+                    self.add_message(sess, "error", sess.last_error)
+                    self._persist_session(sess)
+                emit_session_state(sess, "error")
+                return
+            pause_message = describe_non_final_exit(exit_reason)
+            if exit_reason.get("result") == "CURRENT_TASK_DONE" and has_user_visible_text(full):
+                pause_message = None
+
+            if pause_message:
+                with self.lock:
+                    if sess.active_turn_id != turn_id:
+                        return
+                    sess.partial = None
+                    full = strip_final_info_marker(full)
+                    final_segs = normalize_final_turn_segs(full, done_outputs)
+                    if full.strip():
+                        if final_segs:
+                            self.add_message(sess, "assistant", full, turn_segs=final_segs, interrupted=True)
+                        else:
+                            self.add_message(sess, "assistant", full, interrupted=True)
+                    self.add_message(sess, "system", pause_message, interrupted=True, exit_reason=exit_reason)
+                    try: sess.llm_history = json.loads(json.dumps(agent.llmclient.backend.history, ensure_ascii=False, default=str))
+                    except Exception: pass
+                    sess.status = "idle"
+                    sess.active_turn_id = ""
+                    sess.last_error = ""
+                    self._persist_session(sess)
+                emit_session_state(sess, "idle")
                 return
             if not full:
                 raise RuntimeError("Agent turn ended without a user-visible response.")
@@ -906,6 +1149,10 @@ class AgentManager:
                 self.add_message(sess, "error", str(e))
             print(tb, file=sys.stderr)
             emit_session_state(sess, "error")
+        finally:
+            hooks = getattr(agent, "_turn_end_hooks", None)
+            if isinstance(hooks, dict) and hooks.get(ask_hook_key) is ask_hook:
+                hooks.pop(ask_hook_key, None)
 
     def messages(self, sid: str, after: int = 0, limit: int = 200) -> dict:
         with self.lock:
@@ -921,6 +1168,7 @@ class AgentManager:
                 "status": sess.status,
                 "messages": msgs,
                 "partial": dict(sess.partial) if sess.partial else None,
+                "pendingInput": dict(sess.pending_input) if sess.pending_input else None,
                 "plan": plan_state.desktop_plan_payload_from_session(sess, self.ga_root),
                 "msgSeq": sess.msg_seq,
                 "updatedAt": sess.updated_at,
@@ -945,6 +1193,7 @@ class AgentManager:
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             sess.cancel_requested = True
+            sess.pending_input = None
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
@@ -957,6 +1206,7 @@ class AgentManager:
             sess.active_turn_id = ""
             sess.partial = None
             sess.updated_at = time.time()
+            self._persist_session(sess)
         emit_session_state(sess, "cancelled")
         return {"ok": True, "sessionId": sid}
 
@@ -967,34 +1217,12 @@ class AgentManager:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             if sess.agent is not None:
                 return {"ok": True, "sessionId": sid, "restored": False, "reason": "agent already alive"}
-        agent = self.make_agent(sess)
-        # 恢复 agent 时按会话绑定 seed 模型(未绑定则全局默认),保持显示/使用一致。
-        no = sess.llm_no if sess.llm_no is not None else _global_default_llm_no()
-        if no is not None and hasattr(agent, "next_llm"):
-            with contextlib.suppress(Exception):
-                agent.next_llm(int(no))
-        if sess.llm_history:
-            try:
-                agent.llmclient.backend.history = sess.llm_history
-            except Exception as e:
-                print(f"[bridge] restore llm_history failed: {e}", file=sys.stderr)
-        else:
-            history = []
-            for m in sess.messages:
-                role = m.get("role")
-                content = m.get("content", "")
-                if role == "user":
-                    history.append({"role": "user", "content": [{"type": "text", "text": content}]})
-                elif role == "assistant":
-                    history.append({"role": "assistant", "content": [{"type": "text", "text": content}]})
-            if history:
-                try:
-                    agent.llmclient.backend.history = history
-                except Exception as e:
-                    print(f"[bridge] inject history failed: {e}", file=sys.stderr)
+        agent, created_agent = self._ensure_agent(sess)
+        if not created_agent:
+            return {"ok": True, "sessionId": sid, "restored": False, "reason": "agent already alive"}
         with self.lock:
-            sess.agent = agent
-            sess.status = "idle"
+            if sess.status != "running":
+                sess.status = "awaiting_input" if sess.pending_input else "idle"
         return {"ok": True, "sessionId": sid, "restored": True, "messageCount": len(sess.llm_history or sess.messages)}
 
     def set_session_model(self, sid: str, llm_no: int) -> dict:

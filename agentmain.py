@@ -197,10 +197,18 @@ class GenericAgent:
             gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query, handler, TOOLS_SCHEMA, 
                                     max_turns=180, verbose=self.verbose, yield_info=True)
             try:
-                full_resp = ""; last_pos = 0; curr_turn = 0; turn_resps = []
-                for chunk in gen:
+                full_resp = ""; last_pos = 0; curr_turn = 0; turn_resps = []; exit_reason = {}
+                while True:
+                    try:
+                        chunk = next(gen)
+                    except StopIteration as stop:
+                        exit_reason = stop.value or {}
+                        break
                     if consume_file(self.task_dir, '_stop'): self.abort() 
-                    if self.stop_sig: break
+                    if self.stop_sig:
+                        exit_reason = {'result': 'ABORTED'}
+                        gen.close()
+                        break
                     if isinstance(chunk, dict) and 'turn' in chunk: 
                         curr_turn = chunk['turn']; turn_resps.append(''); continue
                     full_resp += chunk;  turn_resps[-1] += chunk
@@ -211,11 +219,17 @@ class GenericAgent:
                 if self.inc_out and last_pos < len(full_resp):
                     display_queue.put({'next': full_resp[last_pos:], 'source': source,
                                     'turn': curr_turn, 'outputs': turn_resps[-2:]})
-                display_queue.put({'done': full_resp, 'source': source, 'turn': curr_turn, 'outputs': turn_resps.copy()})
+                display_queue.put({'done': full_resp, 'source': source, 'turn': curr_turn,
+                                   'outputs': turn_resps.copy(), 'exit_reason': exit_reason})
                 self.history = handler.history_info
             except Exception as e:
-                print(f"Backend Error: {format_error(e)}")
-                display_queue.put({'done': full_resp + f'\n```\n{format_error(e)}\n```', 'source': source, 'turn': curr_turn, 'outputs': turn_resps.copy()})
+                error_text = format_error(e)
+                print(f"Backend Error: {error_text}")
+                compat_done = full_resp + f'\n```\n{error_text}\n```'
+                display_queue.put({'done': compat_done, 'transcript': full_resp,
+                                   'source': source, 'turn': curr_turn,
+                                   'outputs': turn_resps.copy(), 'error': error_text,
+                                   'exit_reason': {'result': 'ERROR'}})
             finally:
                 if self.stop_sig: print('User aborted the task.')
                 self.is_running = self.stop_sig = False

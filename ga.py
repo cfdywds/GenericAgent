@@ -914,7 +914,8 @@ class GenericAgentHandler(BaseHandler):
 
     def _retry_or_exit(self, prompt):
         self._empty_ct = getattr(self, '_empty_ct', 0) + 1
-        if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)
+        if self._empty_ct >= 3:
+            return StepOutcome({"reason": "EMPTY_RESPONSE_RETRY_EXHAUSTED", "attempts": self._empty_ct}, should_exit=True)
         return StepOutcome({}, next_prompt=prompt)
 
     def do_no_tool(self, args, response):

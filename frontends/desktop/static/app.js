@@ -1428,6 +1428,10 @@ function parseAskUserJson(raw) {
   return null;
 }
 
+function isLocalPath(path) {
+  return /^(?:[A-Za-z]:[\\/]|\\\\|\.\.?[\\/]|~[\\/]|\/(?!\/))/.test(String(path || '').trim());
+}
+
 function normalizeAskUserData(data) {
   const raw = data || {};
   const question = String(raw.question || '').trim();
@@ -1436,7 +1440,12 @@ function normalizeAskUserData(data) {
   const candidates = Array.isArray(cs)
     ? cs.map(x => String(x == null ? '' : x)).filter(x => x.trim())
     : [];
-  return { question, candidates };
+  const images = Array.isArray(raw.images) ? raw.images.map(image => {
+    const path = String(image?.path || '').trim();
+    if (!isLocalPath(path) || !/\.(?:png|jpe?g|gif|webp|bmp)$/i.test(path)) return null;
+    return { name: String(image?.name || path.split(/[\\/]/).pop() || 'image'), path };
+  }).filter(Boolean) : [];
+  return { question, candidates, images };
 }
 
 /** 格式化 ask_user 题干：编号与正文同行；无空行时在 2./3. 前分段 */
@@ -1494,7 +1503,7 @@ function shouldShowAskCandidates(item) {
 }
 
 
-function renderAskUserNotice(data) {
+function renderAskUserNotice(data, { showImages = false } = {}) {
   const item = normalizeAskUserData(data);
   if (!item) return '';
   // 单题与多题统一处理：多题的选项本就内联在题干里；单题的选项放在 candidates 里，
@@ -1508,6 +1517,11 @@ function renderAskUserNotice(data) {
       <span class="ask-user-banner-hint">${escapeHtml(t('ask.replyHint'))}</span>
     </div>
     ${qHtml ? `<div class="ask-user-body md">${qHtml}</div>` : ''}
+    ${showImages && item.images.length ? `<div class="ask-user-images">${item.images.map(image => `
+      <figure class="ask-user-image">
+        <img src="${escapeHtml(uploadRawUrl(image.path))}" alt="${escapeHtml(image.name)}" loading="eager">
+        <figcaption>${escapeHtml(image.name)}</figcaption>
+      </figure>`).join('')}</div>` : ''}
   </div>`;
 }
 
@@ -1536,6 +1550,8 @@ function assistantStructuredText(msg) {
 
 function getPendingAskUser(sess) {
   if (!sess || rt(sess).busy) return null;
+  const structured = normalizeAskUserData(sess.pendingInput);
+  if (structured) return structured;
   const msgs = sess.messages || [];
   let lastAskIdx = -1;
   let askData = null;
@@ -1556,6 +1572,7 @@ function getPendingAskUser(sess) {
 function syncAskUserUi() {
   const sess = activeSess();
   const pending = sess ? getPendingAskUser(sess) : null;
+  renderPendingAskUserCard(pending);
   const notices = [...document.querySelectorAll('.ask-user-notice')];
   notices.forEach((el, i) => {
     const isLast = i === notices.length - 1;
@@ -1564,6 +1581,51 @@ function syncAskUserUi() {
   });
   if (inputEl) inputEl.setAttribute('data-ph', pending ? askUserPlaceholder(pending) : t('composer.placeholder'));  // contenteditable 用 data-ph（无 placeholder 属性）
   if (composerEl) composerEl.classList.toggle('is-awaiting-answer', !!pending);
+}
+
+function pendingAskUserSignature(item) {
+  if (!item) return '';
+  const images = (item.images || []).map(image => `${image.name}\0${image.path}`).join('\n');
+  const candidates = (item.candidates || []).join('\n');
+  return `${item.question}\0${candidates}\0${images}`;
+}
+
+function renderPendingAskUserCard(item) {
+  let panel = document.getElementById('pending-ask-user');
+  if (!item) {
+    panel?.remove();
+    return;
+  }
+  const signature = pendingAskUserSignature(item);
+  const existed = !!panel;
+  if (!panel) {
+    panel = document.createElement('section');
+    panel.id = 'pending-ask-user';
+    panel.className = 'ask-user-pinned';
+  }
+  if (panel.dataset.signature === signature && document.getElementById('pending-ask-user')) return;
+  panel.dataset.signature = signature;
+  panel.innerHTML = renderAskUserNotice(item, { showImages: true });
+  if (item.candidates.length) {
+    const actions = document.createElement('div');
+    actions.className = 'ask-user-actions';
+    for (const candidate of item.candidates) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'ask-user-choice';
+      button.textContent = candidate;
+      button.addEventListener('click', () => {
+        const sess = activeSess();
+        if (!sess || !inputEl || _submitInFlight || rt(sess).busy) return;
+        inputEl.textContent = candidate;
+        void submitInput();
+      });
+      actions.appendChild(button);
+    }
+    panel.appendChild(actions);
+  }
+  ensureMsgs().appendChild(panel);
+  if (!existed) scrollBottom(true);
 }
 
 /* ═══════════════ 渲染后增强 (PR移植) ═══════════════ */
@@ -2307,6 +2369,7 @@ function msgNode(msg) {
   else if (msg.role === 'assistant') {
     const segs = assistantTurnSegs(msg);
     let html = renderAssistantTurnsHtml(segs, msg.curr_turn, false);
+    if (!html && msg.askUser) html = renderAskUserNotice(msg.askUser);
     if (msg.stopped) html += `<p><em>[${escapeHtml(t('status.stopped'))}]</em></p>`;
     el.innerHTML = `<div class="bubble md">${html}</div>`;
     postRenderEnhance(el.querySelector('.bubble'));
@@ -3003,6 +3066,7 @@ function normalize(m) {
   if (m.role !== 'assistant') o.content = m.content || '';
   if (typeof m.display === 'string' && m.display.length) o.display = m.display;
   if (m.stopped) o.stopped = true;
+  if (m.ask_user) o.askUser = m.ask_user;
   if (m.images) o.images = m.images;
   if (m.files) o.files = m.files;
   if (m.ts) o.ts = m.ts;
@@ -3104,6 +3168,7 @@ async function fetchSessionPoll(sess, opts = {}) {
 }
 
 function applyPollResult(sess, result) {
+  sess.pendingInput = result.pendingInput || null;
   if (result.partial) upsert(sess, result.partial, true);
   for (const msg of (result.messages || [])) upsert(sess, msg, false);
   const busy = result.status === 'running' || !!result.partial;
@@ -3160,6 +3225,7 @@ function hydrateHistoryMessages(sess, messages) {
 async function hydrateSession(sess) {
   try {
     const result = await fetchSessionPoll(sess, { after: 0, limit: 0 });
+    sess.pendingInput = result.pendingInput || null;
     hydrateHistoryMessages(sess, result.messages);
     if (result.partial) upsert(sess, result.partial, true);
     const busy = result.status === 'running' || !!result.partial;
@@ -4571,8 +4637,8 @@ window.ga.onBridgeNotification((msg) => {
   if (msg && msg.type === 'session-state') {
     for (const sess of state.sessions.values()) {
       if (sess.bridgeSessionId === msg.sessionId) {
-        if (['running', 'idle', 'error', 'cancelled'].includes(msg.status) ||
-            ['running', 'idle', 'error', 'cancelled'].includes(msg.state)) {
+        if (['running', 'idle', 'awaiting_input', 'error', 'cancelled'].includes(msg.status) ||
+            ['running', 'idle', 'awaiting_input', 'error', 'cancelled'].includes(msg.state)) {
           pollSession(sess);
         }
         if (msg.state === 'idle' || msg.status === 'idle') tokPollBridge();
