@@ -918,6 +918,52 @@ class GenericAgentHandler(BaseHandler):
             return StepOutcome({"reason": "EMPTY_RESPONSE_RETRY_EXHAUSTED", "attempts": self._empty_ct}, should_exit=True)
         return StepOutcome({}, next_prompt=prompt)
 
+    def _looks_like_final_no_tool_answer(self, visible_content):
+        """Decide whether a no-tool turn may end the whole agent run.
+
+        Long tasks frequently emit intermediate prose / status without tools.
+        Treating every visible no-tool reply as CURRENT_TASK_DONE aborts the run
+        mid-way and surfaces as an empty/failed desktop turn.
+        """
+        visible = (visible_content or "").strip()
+        if not visible:
+            return False
+
+        if self._in_plan_mode():
+            remaining = self._check_plan_completion()
+            if remaining is None:
+                return False
+            return remaining == 0
+
+        complete_re = re.compile(
+            r"(任务(已)?完成|全部完成|已完成所有|已完成当前任务|当前任务已完成|"
+            r"修复完成|处理完成|已全部完成|FINISHED|TASK[_\s-]?DONE|"
+            r"All done|Done\.|完成了|搞定了|🏁)",
+            re.IGNORECASE,
+        )
+        incomplete_re = re.compile(
+            r"(下一步|接下来|继续|还需要|尚未|待办|TODO|TBD|正在|准备|"
+            r"先(?:做|改|查|读|写)|然后|稍后|未完成|incomplete|in progress|"
+            r"will (?:now|next)|let me|I'll |I will )",
+            re.IGNORECASE,
+        )
+        if incomplete_re.search(visible):
+            return False
+        if complete_re.search(visible):
+            return True
+
+        # Mid long-run: require an explicit completion signal before ending.
+        recent = "\n".join(self.history_info[-12:]) if self.history_info else ""
+        mid_task = (
+            self.current_turn >= 3
+            or bool(self.working.get("key_info"))
+            or bool(self.working.get("related_sop"))
+            or ("[Agent]" in recent and "直接回答了用户问题" not in recent)
+        )
+        if mid_task:
+            return False
+        return True
+
     def do_no_tool(self, args, response):
         '''这是一个特殊工具，由引擎自主调用，不要包含在TOOLS_SCHEMA里。
         当模型在一轮中未显式调用任何工具时，由引擎自动触发。
@@ -966,6 +1012,24 @@ class GenericAgentHandler(BaseHandler):
             remaining = self._check_plan_completion()
             if remaining == 0:
                 self._exit_plan_mode(); yield "[Info] Plan完成：plan.md中0个[ ]残留，退出plan模式。\n"
+            elif remaining is not None and remaining > 0:
+                yield "[Info] Plan still has open tasks; continue instead of finalizing no-tool turn.\n"
+                next_prompt = (
+                    f"[System] 当前仍在 plan 模式，plan 中还有 {remaining} 个未完成项 [ ]。"
+                    "本轮未调用工具，不能结束任务。请 file_read plan 文件确认当前步骤并继续执行工具推进。\n"
+                )
+                next_prompt += self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+                return StepOutcome({"result": "PLAN_INCOMPLETE_CONTINUE"}, next_prompt=next_prompt)
+
+        if not self._looks_like_final_no_tool_answer(visible_content):
+            yield "[Info] Intermediate no-tool reply detected; keep running the task.\n"
+            next_prompt = (
+                "[System] 你本轮没有调用任何工具。长任务中途的状态说明不能结束整轮执行。\n"
+                "若任务尚未完成：请立即调用工具继续推进（file_read/file_patch/code_run 等）。\n"
+                "若任务确实已完成：请给出面向用户的最终结论，并明确写清“任务完成/已完成”。\n"
+            )
+            next_prompt += self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+            return StepOutcome({"result": "NO_TOOL_CONTINUE"}, next_prompt=next_prompt)
         
         #yield "[Info] Final response to user.\n"
         return StepOutcome(response, next_prompt=None)
