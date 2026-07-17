@@ -91,20 +91,84 @@ _RUNNING_MARKER_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _SUMMARY_RE = re.compile(r'<summary>[\s\S]*?</summary>', re.IGNORECASE)
-_TOOL_TRANSCRIPT_RE = re.compile(
-    r'(?ms)^\s*.*?Tool:\s*`.*?`{4}[^\n]*\n.*?`{4}\s*(?:`{5}.*?`{5}\s*)?'
-)
+# Parse complete tool-call transcript blocks without swallowing surrounding prose.
+# The old DOTALL pattern used .*? from line start to "Tool:", which deleted mid-run
+# status text and made long-task finals look "empty" even when progress existed.
+_TOOL_HEADER_RE = re.compile(r'^\s*.{0,40}Tool:\s*`[^`\n]+`[^\n]*$')
+_FENCE_LINE_RE = re.compile(r'^\s*(`{4,})([^`]*)\s*$')
+_STRUCTURAL_BOUNDARY_RE = re.compile(r'^\s*<(?:summary|thinking)\b', re.IGNORECASE)
 
 
 def strip_final_info_marker(text: Any) -> str:
     return _FINAL_INFO_RE.sub('', str(text or ''))
 
 
+def _fence_parts(line: str) -> tuple[int, str]:
+    match = _FENCE_LINE_RE.fullmatch(line.rstrip("\r\n"))
+    if not match:
+        return 0, ""
+    return len(match.group(1)), match.group(2).strip()
+
+
+def _is_tool_transcript_boundary(line: str) -> bool:
+    stripped = line.rstrip("\r\n")
+    return bool(
+        _TOOL_HEADER_RE.fullmatch(stripped)
+        or _RUNNING_MARKER_RE.fullmatch(stripped)
+        or _STRUCTURAL_BOUNDARY_RE.match(stripped)
+    )
+
+
+def _find_fence_close(lines: list[str], start: int, ticks: int) -> Optional[int]:
+    for index in range(start, len(lines)):
+        if _is_tool_transcript_boundary(lines[index]):
+            return None
+        line_ticks, tag = _fence_parts(lines[index])
+        if line_ticks == ticks and not tag:
+            return index
+    return None
+
+
+def _complete_tool_transcript_end(lines: list[str], start: int) -> Optional[int]:
+    if not _TOOL_HEADER_RE.fullmatch(lines[start].rstrip("\r\n")) or start + 1 >= len(lines):
+        return None
+    args_ticks, _ = _fence_parts(lines[start + 1])
+    if args_ticks != 4:
+        return None
+
+    args_close = _find_fence_close(lines, start + 2, 4)
+    if args_close is None:
+        return None
+    end = args_close + 1
+
+    if end >= len(lines):
+        return end
+    result_ticks, result_tag = _fence_parts(lines[end])
+    if result_ticks != 5 or result_tag:
+        return end
+    result_close = _find_fence_close(lines, end + 1, 5)
+    return result_close + 1 if result_close is not None else None
+
+
+def _strip_complete_tool_transcripts(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    visible = []
+    index = 0
+    while index < len(lines):
+        end = _complete_tool_transcript_end(lines, index)
+        if end is None:
+            visible.append(lines[index])
+            index += 1
+        else:
+            index = end
+    return "".join(visible)
+
+
 def strip_non_user_visible_text(text: Any) -> str:
     cleaned = strip_final_info_marker(text)
+    cleaned = _strip_complete_tool_transcripts(cleaned)
     cleaned = _RUNNING_MARKER_RE.sub('', cleaned)
     cleaned = _SUMMARY_RE.sub('', cleaned)
-    cleaned = _TOOL_TRANSCRIPT_RE.sub('', cleaned)
     return cleaned.strip()
 
 
@@ -128,6 +192,27 @@ def describe_non_final_exit(exit_reason: Any) -> Optional[str]:
         attempts = data.get("attempts") or 3
         return f"任务已暂停：模型连续 {attempts} 次未返回可用回复。上下文和已完成进度已保留，请发送“继续”重试。"
     return None
+
+
+def describe_empty_visible_response(exit_reason: Any = None, *, has_transcript: bool = False) -> str:
+    """Fallback system note when a turn ends without user-visible prose.
+
+    Long multi-tool runs often leave only running markers / tool transcripts /
+    <summary> tags after strip_non_user_visible_text. Treat that as a resumable
+    pause instead of a hard error so context and progress stay recoverable.
+    """
+    pause = describe_non_final_exit(exit_reason)
+    if pause:
+        return pause
+    if has_transcript:
+        return (
+            "执行已结束，但未生成面向用户的说明。"
+            "工具轨迹和上下文已保留，请发送“继续”要求完成后续工作。"
+        )
+    return (
+        "任务已暂停：本轮未生成面向用户的有效回复。"
+        "上下文已保留，请发送“继续”重试，或补充更具体的指令。"
+    )
 
 
 def normalize_final_turn_segs(full: str, outputs: Any) -> Optional[List[str]]:
@@ -1093,19 +1178,28 @@ class AgentManager:
             if exit_reason.get("result") == "CURRENT_TASK_DONE" and has_user_visible_text(full):
                 pause_message = None
 
+            full = strip_final_info_marker(full)
+            if not pause_message and not has_user_visible_text(full):
+                # Tool-only / summary-only / blank finals used to raise a hard error
+                # and surface "Agent turn ended without a user-visible response."
+                # On long tasks that drops a recoverable run into error state.
+                pause_message = describe_empty_visible_response(
+                    exit_reason,
+                    has_transcript=bool(str(full or "").strip()),
+                )
+
             if pause_message:
                 with self.lock:
                     if sess.active_turn_id != turn_id:
                         return
                     sess.partial = None
-                    full = strip_final_info_marker(full)
                     final_segs = normalize_final_turn_segs(full, done_outputs)
                     if full.strip():
                         if final_segs:
                             self.add_message(sess, "assistant", full, turn_segs=final_segs, interrupted=True)
                         else:
                             self.add_message(sess, "assistant", full, interrupted=True)
-                    self.add_message(sess, "system", pause_message, interrupted=True, exit_reason=exit_reason)
+                    self.add_message(sess, "system", pause_message, interrupted=True, exit_reason=exit_reason or None)
                     try: sess.llm_history = json.loads(json.dumps(agent.llmclient.backend.history, ensure_ascii=False, default=str))
                     except Exception: pass
                     sess.status = "idle"
@@ -1114,15 +1208,10 @@ class AgentManager:
                     self._persist_session(sess)
                 emit_session_state(sess, "idle")
                 return
-            if not full:
-                raise RuntimeError("Agent turn ended without a user-visible response.")
             with self.lock:
                 if sess.active_turn_id != turn_id:
                     return
                 sess.partial = None
-                full = strip_final_info_marker(full)
-                if not has_user_visible_text(full):
-                    raise RuntimeError("Agent turn ended without a user-visible response.")
                 import plan_state
                 plan_state.sync_plan_path_from_text(sess, full, sess.cwd or self.ga_root)
                 # 轨道2: 落库时带结构化全量轮(权威turn_segs),前端按轮渲染;content保留兜底

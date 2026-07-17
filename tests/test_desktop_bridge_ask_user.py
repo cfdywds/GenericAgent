@@ -394,19 +394,103 @@ class DesktopBridgeAskUserTests(unittest.TestCase):
         self.assertIn("180", message)
 
 
-    def test_empty_done_without_interrupt_remains_an_error(self):
+    def test_empty_done_without_interrupt_is_resumable(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = manager_for_test(pathlib.Path(tmp))
             sess = desktop_bridge.Session(id="sess-empty", cwd=tmp, agent=FakeAgent(),
                                           status="running", active_turn_id="turn-1")
             manager.sessions[sess.id] = sess
 
-            with (mock.patch.object(desktop_bridge, "emit_session_state"),
-                  mock.patch.object(desktop_bridge.sys, "stderr", new=io.StringIO())):
+            with mock.patch.object(desktop_bridge, "emit_session_state") as emit:
                 manager.run_agent_turn(sess, "开始任务", turn_id="turn-1")
 
-            self.assertEqual(sess.status, "error")
-            self.assertEqual(sess.messages[-1]["role"], "error")
+            self.assertEqual(sess.status, "idle")
+            self.assertEqual(sess.last_error, "")
+            self.assertEqual(sess.messages[-1]["role"], "system")
+            self.assertIn("未生成面向用户的有效回复", sess.messages[-1]["content"])
+            emit.assert_called_with(sess, "idle")
+
+    def test_tool_only_transcript_without_visible_prose_is_resumable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = manager_for_test(pathlib.Path(tmp))
+            transcript = (
+                "**LLM Running (Turn 1) ...**\n\n"
+                "🛠️ Tool: `file_read`  📥 args:\n"
+                "````text\n{}\n````\n"
+                "`````\nresult\n`````\n"
+                "**LLM Running (Turn 2) ...**\n\n"
+                "<summary>已完成工具调用</summary>\n"
+            )
+            agent = FakeAgent(done=transcript, outputs=[transcript], exit_reason={})
+            agent.llmclient.backend.history = [{"role": "assistant", "content": "tool context"}]
+            sess = desktop_bridge.Session(id="sess-tool-transcript", cwd=tmp, agent=agent,
+                                          status="running", active_turn_id="turn-1")
+            manager.sessions[sess.id] = sess
+
+            with mock.patch.object(desktop_bridge, "emit_session_state") as emit:
+                manager.run_agent_turn(sess, "长任务", turn_id="turn-1")
+
+            self.assertEqual(sess.status, "idle")
+            self.assertEqual(sess.last_error, "")
+            self.assertEqual(sess.messages[-2]["role"], "assistant")
+            self.assertEqual(sess.messages[-2]["content"], transcript)
+            self.assertEqual(sess.messages[-1]["role"], "system")
+            self.assertIn("未生成面向用户的说明", sess.messages[-1]["content"])
+            self.assertEqual(sess.llm_history, agent.llmclient.backend.history)
+            emit.assert_called_with(sess, "idle")
+
+    def test_strip_non_user_visible_keeps_progress_prose_between_tools(self):
+        transcript = (
+            "**LLM Running (Turn 1) ...**\n\n"
+            "阶段进度：已完成模块扫描。\n\n"
+            "🛠️ Tool: `file_read`  📥 args:\n"
+            "````text\n{}\n````\n"
+            "`````\nresult\n`````\n"
+            "**LLM Running (Turn 2) ...**\n\n"
+            "下一步将继续修改。\n"
+        )
+        cleaned = desktop_bridge.strip_non_user_visible_text(transcript)
+        self.assertIn("阶段进度", cleaned)
+        self.assertIn("下一步将继续修改", cleaned)
+        self.assertTrue(desktop_bridge.has_user_visible_text(transcript))
+
+    def test_strip_non_user_visible_does_not_cross_truncated_tool_block(self):
+        transcript = (
+            "🛠️ Tool: `file_read`  📥 args:\n"
+            "````text\n{\"path\": \"missing-close\"}\n"
+            "阶段进度：首个工具记录不完整，但扫描已经完成。\n"
+            "🛠️ Tool: `file_patch`  📥 args:\n"
+            "````text\n{}\n````\n"
+            "`````\npatched\n`````\n"
+            "下一步将继续验证。\n"
+        )
+        cleaned = desktop_bridge.strip_non_user_visible_text(transcript)
+        self.assertIn("阶段进度", cleaned)
+        self.assertIn("下一步将继续验证", cleaned)
+        self.assertNotIn("file_patch", cleaned)
+
+    def test_strip_non_user_visible_stops_at_summary_after_truncated_tool(self):
+        transcript = (
+            "🛠️ Tool: `file_read`  📥 args:\n"
+            "````text\n{}\n"
+            "阶段进度：工具执行已结束，准备汇总。\n"
+            "<summary>中间摘要</summary>\n"
+            "````\n"
+        )
+        cleaned = desktop_bridge.strip_non_user_visible_text(transcript)
+        self.assertIn("阶段进度", cleaned)
+        self.assertNotIn("中间摘要", cleaned)
+
+    def test_describe_empty_visible_response_prefers_exit_reason(self):
+        msg = desktop_bridge.describe_empty_visible_response(
+            {"result": "MAX_TURNS_EXCEEDED"},
+            has_transcript=True,
+        )
+        self.assertIn("180", msg)
+        msg = desktop_bridge.describe_empty_visible_response(None, has_transcript=True)
+        self.assertIn("未生成面向用户的说明", msg)
+        msg = desktop_bridge.describe_empty_visible_response(None, has_transcript=False)
+        self.assertIn("未生成面向用户的有效回复", msg)
 
 
 if __name__ == "__main__":
