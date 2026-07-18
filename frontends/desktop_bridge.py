@@ -1113,9 +1113,7 @@ class AgentManager:
                     else:
                         pieces.append(str(item))
                 if not full and pieces:
-                    candidate = pieces[-1] if not getattr(agent, "inc_out", False) else "".join(pieces)
-                    if has_user_visible_text(candidate):
-                        full = candidate
+                    full = pieces[-1] if not getattr(agent, "inc_out", False) else "".join(pieces)
             else:
                 full = "GenericAgent object has no put_task method"
             is_current, is_cancelled = turn_state()
@@ -1208,10 +1206,13 @@ class AgentManager:
                     self._persist_session(sess)
                 emit_session_state(sess, "idle")
                 return
+            if not full:
+                full = "(completed)"
             with self.lock:
                 if sess.active_turn_id != turn_id:
                     return
                 sess.partial = None
+                full = strip_final_info_marker(full)
                 import plan_state
                 plan_state.sync_plan_path_from_text(sess, full, sess.cwd or self.ga_root)
                 # 轨道2: 落库时带结构化全量轮(权威turn_segs),前端按轮渲染;content保留兜底
@@ -1289,7 +1290,7 @@ class AgentManager:
             partial_text = ""
             if sess.partial:
                 partial_text = (sess.partial.get("content") or "").strip()
-            if partial_text and has_user_visible_text(partial_text):
+            if partial_text:
                 self.add_message(sess, "assistant", partial_text, stopped=True)
             sess.status = "cancelled"
             sess.active_turn_id = ""
