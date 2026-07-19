@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
@@ -114,10 +116,20 @@ class DoNoToolMidTaskTests(unittest.TestCase):
             outcome = self._run("最终核验后结案。")
         self.assertIsNone(outcome.next_prompt)
 
-    def test_blank_still_retries(self):
+    def test_completed_plan_verdict_pass_finishes_without_completion_phrase(self):
+        with TemporaryDirectory() as temp_dir:
+            plan_path = Path(temp_dir) / "plan.md"
+            plan_path.write_text("- [✓] Verify final result\n", encoding="utf-8")
+            self.handler.enter_plan_mode(str(plan_path))
+            outcome = self._run("全步骤验证完毕。VERDICT: PASS，现向用户交付报告。")
+        self.assertIsNone(outcome.next_prompt)
+        self.assertIsNone(self.handler._in_plan_mode())
+
+    def test_summary_only_response_continues_without_blank_retry(self):
         outcome = self._run("<summary>only summary</summary>")
         self.assertTrue(outcome.next_prompt)
-        self.assertIn("Blank response", outcome.next_prompt)
+        self.assertIn("长任务中途", outcome.next_prompt)
+        self.assertNotIn("Blank response", outcome.next_prompt)
 
     def test_has_incomplete_work_signal_helpers(self):
         h = self.handler

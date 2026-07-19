@@ -11,6 +11,7 @@
 ### --task 持续协作模式
 - `python agentmain.py --task {name} [--input "短文本"] [--llm_no N]`（cwd=代码根）
 - `--input`自动建目录+清旧output+写input.txt；长文本先手动写input.txt再启动(不带--input)
+- **task 目录 = `temp/{name}`**（相对代码根），**不是** `temp/tasks/{name}`（踩坑：写错目录导致空轮询）
 - **不要--nobg**（会卡在等reply循环），只能后台启动
 - 通信：output.txt(`[ROUND END]`=轮完成) → 写reply.txt继续 → 不写10min退出。reply后输出为output1/2/3.txt
 - 干预文件：`_stop`(当轮结束) | `_keyinfo`(注入working memory) | `_intervene`(追加指令)

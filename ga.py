@@ -897,7 +897,9 @@ class GenericAgentHandler(BaseHandler):
         return plan_path
     def _check_plan_completion(self):
         if not os.path.isfile(p:=self._in_plan_mode() or ''): return None
-        try: return len(re.findall(r'\[ \]', open(p, encoding='utf-8', errors='replace').read()))
+        try:
+            with open(p, encoding='utf-8', errors='replace') as plan_file:
+                return len(re.findall(r'\[ \]', plan_file.read()))
         except: return None
     
     def do_update_working_checkpoint(self, args, response):
@@ -1040,6 +1042,8 @@ class GenericAgentHandler(BaseHandler):
         二次确认仅在回复几乎只包含<thinking>/<summary>和一段大代码块时触发。'''
         content = getattr(response, 'content', '') or ""
         thinking = getattr(response, 'thinking', '') or ""
+        visible_content = re.sub(r"<thinking>[\s\S]*?</thinking>", "", content, flags=re.IGNORECASE)
+        visible_content = re.sub(r"<summary>[\s\S]*?</summary>", "", visible_content, flags=re.IGNORECASE)
         if not response or (not content.strip() and not thinking.strip()):
             yield "[Warn] LLM returned an empty response. Retrying...\n"
             return self._retry_or_exit("[System] Blank response, regenerate and tooluse")
@@ -1079,7 +1083,14 @@ class GenericAgentHandler(BaseHandler):
         if self._in_plan_mode():
             remaining = self._check_plan_completion()
             if remaining == 0:
-                verified = self._is_verified_plan_completion(visible_content) or self._has_recent_plan_verification()
+                # A zero-open-item plan is the completion signal.  The final
+                # verification reply need not repeat a completion phrase.
+                verified = self._has_recent_plan_verification() or bool(re.search(
+                    r"(?:VERIFY|VERDICT)\s*[:：-]?\s*PASS|验证(?:通过|成功)|"
+                    r"测试(?:全部|均)?通过",
+                    visible_content,
+                    re.IGNORECASE,
+                ))
                 self._exit_plan_mode(); yield "[Info] Plan完成：plan.md中0个[ ]残留，退出plan模式。\n"
                 if verified:
                     yield "[Info] Recent plan verification passed; finalizing without another no-tool turn.\n"

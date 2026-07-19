@@ -24,6 +24,12 @@ try:
 
     install(hooks, ga_root=_GA_ROOT)
 except ImportError as e:
-    sys.stderr.write(
-        f"[privacy_guard] NOT ACTIVE — engine not installed ({e}).\n"
-        f"[privacy_guard] fix: pip install -e D:/navy_code/llm-privacy-guard\n")
+    try:
+        err = sys.stderr
+        if err is not None:
+            err.write(
+                f"[privacy_guard] NOT ACTIVE — engine not installed ({e}).\n"
+                f"[privacy_guard] fix: pip install -e D:/navy_code/llm-privacy-guard\n"
+            )
+    except Exception:
+        pass
