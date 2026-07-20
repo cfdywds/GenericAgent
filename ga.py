@@ -1,4 +1,4 @@
-import sys, os, re, json, time, threading, importlib, ast, webbrowser
+import sys, os, re, json, time, threading, importlib, webbrowser
 from datetime import datetime
 from pathlib import Path
 import tempfile, traceback, subprocess, itertools, collections, difflib, shutil
@@ -7,171 +7,20 @@ if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from agent_loop import BaseHandler, StepOutcome, json_default
-from security.file_policy import FilePolicy
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 def safe_print(*args, **kwargs):
     try: print(*args, **kwargs)
     except: pass
 
-def _compact_code_for_scan(code):
-    text = re.sub(r'(?m)#.*$', '', code or '')
-    return re.sub(r'\s+', ' ', text).strip().lower()
-
-
-_BROAD_KILL_PATTERNS = [
-    (r'\btaskkill\b[^;&|]*(?:/im\s+(?:python|pythonw|py)(?:\.exe)?\b|/pid\s+\$pid\b)', "taskkill targets Python or the current PID"),
-    (r'\bstop-process\b[^;&|]*(?:-name\s+(?:python|pythonw|py)\b|-id\s+\$pid\b)', "Stop-Process targets Python or the current PID"),
-    (r'\bget-process\b[^;&|]*(?:python|pythonw|py)\b[^;&|]*\|\s*stop-process\b', "pipeline stops Python processes"),
-    (r'\b(?:pkill|killall)\b[^;&|]*(?:python|pythonw|py)\b', "pkill/killall targets Python processes"),
-]
-
-
-def _unsafe_shell_run_reason(code):
-    text = _compact_code_for_scan(code)
-    if not text:
-        return None
-    patterns = _BROAD_KILL_PATTERNS + [
-        (r'\bkill\s+-9\s+\$\$\b', "kill targets the current shell process"),
-        (r'\bremove-item\b[^;&|]*(?:-recurse|-force)\b', "Remove-Item performs recursive or forced deletion"),
-        (r'\brm\b[^;&|]*(?:-[^\s;&|]*r|-[^\s;&|]*f)\b', "rm performs recursive or forced deletion"),
-        (r'\b(?:del|erase)\b[^;&|]*(?:/s|/q)\b', "delete command performs broad deletion"),
-        (r'\bgit\s+reset\b[^;&|]*--hard\b', "git reset --hard can discard local work"),
-        (r'\bgit\s+clean\b[^;&|]*-[^\s;&|]*f', "git clean -f can delete untracked files"),
-        (r'\bfind\b[^;&|]*\s-delete\b', "find -delete can remove many files"),
-    ]
-    for pattern, reason in patterns:
-        if re.search(pattern, text, re.IGNORECASE):
-            return reason
-    return None
-
-
-def _literal_str(node):
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _literal_str(node.left)
-        right = _literal_str(node.right)
-        if left is not None and right is not None:
-            return left + right
-    if isinstance(node, ast.JoinedStr):
-        parts = []
-        for value in node.values:
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                parts.append(value.value)
-            else:
-                return None
-        return "".join(parts)
-    return None
-
-
-def _python_aliases(tree):
-    aliases = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for item in node.names:
-                root = item.name.split(".", 1)[0]
-                if root in {"os", "subprocess", "shutil", "pathlib"}:
-                    aliases[item.asname or root] = item.name
-        elif isinstance(node, ast.ImportFrom) and node.module in {"os", "subprocess", "shutil", "pathlib"}:
-            for item in node.names:
-                aliases[item.asname or item.name] = f"{node.module}.{item.name}"
-    return aliases
-
-
-def _qualified_name(node, aliases):
-    if isinstance(node, ast.Name):
-        return aliases.get(node.id, node.id)
-    if isinstance(node, ast.Attribute):
-        base = _qualified_name(node.value, aliases)
-        return f"{base}.{node.attr}" if base else None
-    if isinstance(node, ast.Call):
-        func = _qualified_name(node.func, aliases)
-        if func == "getattr" and len(node.args) >= 2:
-            base = _qualified_name(node.args[0], aliases)
-            attr = _literal_str(node.args[1])
-            return f"{base}.{attr}" if base and attr else None
-        if func == "__import__" and node.args:
-            return _literal_str(node.args[0])
-        if func in {"pathlib.Path", "pathlib.PurePath"}:
-            return func
-    return None
-
-
-def _iter_call_string_literals(node):
-    for child in ast.walk(node):
-        value = _literal_str(child)
-        if value:
-            yield value
-
-
-def _unsafe_python_run_reason(code, depth=0):
-    try:
-        tree = ast.parse(code or "")
-    except SyntaxError:
-        return _unsafe_shell_run_reason(code)
-
-    aliases = _python_aliases(tree)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            reason = _unsafe_shell_run_reason(node.value)
-            if reason:
-                return reason
-        if not isinstance(node, ast.Call):
-            continue
-
-        func = _qualified_name(node.func, aliases)
-        if func == "os._exit":
-            return "os._exit() terminates the interpreter immediately"
-
-        if func in {"os.remove", "os.unlink", "os.rmdir", "shutil.rmtree"}:
-            return f"{func} can delete files or directories"
-
-        if func in {"pathlib.Path.unlink", "pathlib.Path.rmdir", "pathlib.PurePath.unlink", "pathlib.PurePath.rmdir"}:
-            return f"{func} can delete files or directories"
-
-        if func == "os.kill" and node.args:
-            target = node.args[0]
-            target_func = _qualified_name(target.func, aliases) if isinstance(target, ast.Call) else _qualified_name(target, aliases)
-            if target_func == "os.getpid":
-                return "os.kill(os.getpid()) targets the current process"
-            if target_func == "os.getppid":
-                return "os.kill(os.getppid()) targets the parent GA process"
-
-        if func and func.startswith("subprocess."):
-            joined = " ".join(_iter_call_string_literals(node))
-            reason = _unsafe_shell_run_reason(joined)
-            if reason:
-                return f"subprocess call contains broad process-kill command: {reason}"
-
-        if depth < 2 and func in {"eval", "exec", "builtins.eval", "builtins.exec"} and node.args:
-            embedded = _literal_str(node.args[0])
-            if embedded:
-                reason = _unsafe_python_run_reason(embedded, depth + 1)
-                if reason:
-                    return reason
-    return None
-
-def _unsafe_code_run_reason(code, code_type):
-    """Block obvious commands that can terminate the running GA process."""
-    code_type = (code_type or "").lower()
-    if code_type in ["python", "py"]:
-        return _unsafe_python_run_reason(code)
-    if code_type in ["powershell", "bash", "sh", "shell", "ps1", "pwsh"]:
-        return _unsafe_shell_run_reason(code)
-    return None
-
 def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=None, maxlen=10000, myprint=safe_print):
     """代码执行器
     python: 运行复杂的 .py 脚本（文件模式）
     powershell/bash: 运行单行指令（命令模式）
     优先使用python，仅在必要系统操作时使用powershell"""
-    cwd = cwd or os.path.join(script_dir, 'temp'); tmp_path = None
     preview = (code[:60].replace('\n', ' ') + '...') if len(code) > 60 else code.strip()
     yield f"[Action] Running {code_type} in {os.path.basename(cwd)}: {preview}\n"
-    unsafe_reason = _unsafe_code_run_reason(code, code_type)
-    if unsafe_reason:
-        return {"status": "error", "msg": f"已阻止不安全的 code_run: {unsafe_reason}"}
+    cwd = cwd or os.path.join(script_dir, 'temp'); tmp_path = None
     if code_type in ["python", "py"]:
         tmp_file = tempfile.NamedTemporaryFile(suffix=".ai.py", delete=False, mode='w', encoding='utf-8', dir=code_cwd)
         cr_header = os.path.join(script_dir, 'assets', 'code_run_header.py')
@@ -291,12 +140,7 @@ def web_scan(tabs_only=False, switch_tab_id=None, text_only=False, maxlen=35000)
             }
         }
         if not tabs_only: 
-            global simphtml
-            if 'simphtml' in sys.modules:
-                simphtml = importlib.reload(sys.modules['simphtml'])
-            else:
-                simphtml = importlib.import_module('simphtml')
-            result["content"] = simphtml.get_html(driver, cutlist=True, maxchars=maxlen, text_only=text_only)
+            importlib.reload(simphtml); result["content"] = simphtml.get_html(driver, cutlist=True, maxchars=maxlen, text_only=text_only)
             if text_only: result['content'] = smart_format(result['content'], max_str_len=maxlen//3, omit_str='\n\n[omitted long content]\n\n')
         return result
     except Exception as e:
@@ -451,19 +295,6 @@ class GenericAgentHandler(BaseHandler):
         if not path: return ""
         return os.path.abspath(os.path.join(self.cwd, path))   
 
-    def _file_policy(self):
-        return FilePolicy(root=script_dir, cwd=self.cwd)
-
-    def _blocked_file_decision(self, decision, operation):
-        return {
-            "status": "blocked",
-            "operation": operation,
-            "risk": decision.risk,
-            "reason": decision.reason,
-            "path": decision.path,
-            "decision": decision.to_dict(),
-        }
-
     def _extract_code_block(self, response, code_type):
         code_type = {'python':'python|py', 'powershell':'powershell|ps1|pwsh', 'bash':'bash|sh|shell'}.get(code_type, re.escape(code_type))
         matches = re.findall(rf"```(?:{code_type})\n(.*?)\n```", response.content, re.DOTALL)
@@ -482,10 +313,15 @@ class GenericAgentHandler(BaseHandler):
         code_cwd = os.path.normpath(self.cwd)
         maxlen = self._get_tool_maxlen(10000, args)
         if code_type == 'python' and _arg(args, "inline_eval", False, bool):
-            result = {
-                "status": "error",
-                "msg": "inline_eval disabled: it runs inside the GA process and can terminate the agent. Use normal python code_run instead."
-            }
+            ns = {'handler':self, 'parent':self.parent, 'history':json.dumps(self.parent.llmclient.backend.history)}
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(cwd)
+                try:
+                    try: result = repr(eval(code, ns))
+                    except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
+                except Exception as e: result = f'Error: {e}'
+            finally: os.chdir(old_cwd)
         else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal, maxlen=maxlen, myprint=self.print)
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
@@ -526,13 +362,6 @@ class GenericAgentHandler(BaseHandler):
         if save_to_file and "js_return" in result:
             content = str(result["js_return"] or '')
             abs_path = self._get_abs_path(save_to_file)
-            policy = self._file_policy()
-            decision = policy.evaluate("overwrite", abs_path)
-            policy.log_event("overwrite", abs_path, decision, extra={"tool": "web_execute_js", "mode": "save_to_file"})
-            if decision.action != "allow":
-                yield f"[Status] ❌ 安全策略阻止保存 JS 结果: {decision.reason}\n"
-                return StepOutcome(self._blocked_file_decision(decision, "overwrite"), next_prompt="\n")
-            policy.backup_existing(abs_path, reason="web_execute_js save_to_file backup")
             result["js_return"] = smart_format(content, max_str_len=170)
             try:
                 with open(abs_path, 'w', encoding='utf-8') as f: f.write(str(content))
@@ -546,248 +375,6 @@ class GenericAgentHandler(BaseHandler):
         maxlen = self._get_tool_maxlen(8000, args)
         return StepOutcome(smart_format(result, max_str_len=maxlen), next_prompt=next_prompt)
     
-    def do_web_search(self, args, response):
-        '''搜索互联网。优先Grok Live Search，失败降级到浏览器Google。'''
-        import urllib.request, urllib.error, urllib.parse, ssl as _ssl, re as _re
-        from llmcore import reload_mykeys
-        query = args.get("query", "")
-        max_results = args.get("max_results", 5)
-        if not query:
-            return StepOutcome({"status": "error", "msg": "query is required"}, next_prompt="\n")
-
-        mykeys, _ = reload_mykeys()
-        search_cfg = (
-            mykeys.get("grok2api_search_config")
-            or mykeys.get("grok2api_config")
-            or mykeys.get("web_search_config")
-            or {}
-        )
-        def _usable_secret(value):
-            value = str(value or "").strip()
-            lowered = value.lower()
-            if lowered in {"", "changeme", "your-api-key", "your_api_key", "<your-grok2api-key>", "sk-<your-grok2api-key>"}:
-                return ""
-            if "<your-" in lowered:
-                return ""
-            return value
-
-        def _format_grok_error(err):
-            if isinstance(err, urllib.error.HTTPError):
-                try:
-                    body = err.read().decode("utf-8", errors="replace").strip()
-                except Exception:
-                    body = ""
-                msg = f"HTTP {err.code} {err.reason}"
-                if body:
-                    msg += f": {smart_format(body, max_str_len=500)}"
-                return msg
-            return f"{type(err).__name__}: {err}"
-
-        apibase = (search_cfg.get("apibase") or os.environ.get("GROK2API_APIBASE") or "https://grok.obxunil.eu.cc/v1").rstrip("/")
-        endpoint = apibase if apibase.endswith("/chat/completions") else f"{apibase}/chat/completions"
-        apikey = (
-            _usable_secret(search_cfg.get("apikey"))
-            or _usable_secret(search_cfg.get("api_key"))
-            or _usable_secret(os.environ.get("GROK2API_API_KEY"))
-            or "123"
-        )
-        model = search_cfg.get("model") or os.environ.get("GROK2API_MODEL") or "grok-4.20-0309-non-reasoning"
-        grok_error = ""
-
-        def _request_grok(include_live_search):
-            body = {
-                "model": model,
-                "messages": [{"role": "user", "content": query}],
-                "stream": False,
-            }
-            if include_live_search:
-                body["search_parameters"] = {"mode": "auto"}
-            payload = json.dumps(body).encode("utf-8")
-            ctx = _ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = _ssl.CERT_NONE
-            req = urllib.request.Request(
-                endpoint,
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {apikey}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                },
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=45, context=ctx) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-
-        def _grok_success_outcome(data, channel):
-            choice = data.get("choices", [{}])[0]
-            message = choice.get("message", {})
-            answer = message.get("content", "")
-            sources = []
-            for ann in message.get("annotations", []):
-                if ann.get("type") == "url_citation":
-                    uc = ann.get("url_citation", {})
-                    sources.append({
-                        "url": uc.get("url", ""),
-                        "title": uc.get("title", ""),
-                        "snippet": smart_format(uc.get("snippet", ""), max_str_len=200)
-                    })
-            if answer and answer.strip():
-                self.print(f"[web_search] Grok搜索成功: {query}")
-                return StepOutcome({
-                    "status": "success", "channel": channel,
-                    "answer": answer, "sources": sources[:max_results],
-                    "query": query, "model": data.get("model", "")
-                }, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
-            raise ValueError("Grok returned empty answer")
-
-        # ── 尝试1: Grok Live Search ──
-        try:
-            if not apikey:
-                raise ValueError("grok2api API key is missing or placeholder")
-            try:
-                data = _request_grok(include_live_search=True)
-                return _grok_success_outcome(data, "grok")
-            except Exception as live_exc:
-                live_error = _format_grok_error(live_exc)
-                self.print(f"[web_search] Grok live search失败({live_error})，重试普通Grok chat...")
-                try:
-                    data = _request_grok(include_live_search=False)
-                    return _grok_success_outcome(data, "grok_chat_fallback")
-                except Exception as chat_exc:
-                    chat_error = _format_grok_error(chat_exc)
-                    raise RuntimeError(f"live search failed: {live_error}; chat fallback failed: {chat_error}") from chat_exc
-        except Exception as e:
-            grok_error = _format_grok_error(e)
-            self.print(f"[web_search] Grok搜索失败({e})，降级到浏览器Google... 可在 mykey.py 配置 grok2api_search_config 或设置 GROK2API_APIBASE/GROK2API_API_KEY/GROK2API_MODEL")
-
-        # ── 尝试2: 降级到浏览器Google ──
-        try:
-            encoded_q = urllib.parse.quote(query)
-            web_execute_js(f'window.location.href="https://www.google.com/search?q={encoded_q}"')
-            time.sleep(2)
-            scan_result = web_scan(text_only=True)
-            page_text = (scan_result.get("content") or scan_result.get("text") or "") if isinstance(scan_result, dict) else str(scan_result)
-            lines = [ln.strip() for ln in page_text.split('\n') if ln.strip() and len(ln.strip()) > 20]
-            snippets = lines[:max_results * 3]
-            summary = '\n'.join(snippets[:15])
-            if summary.strip():
-                self.print(f"[web_search] 降级Google搜索成功: {query}")
-                return StepOutcome({
-                    "status": "success", "channel": "google_fallback",
-                    "answer": summary,
-                    "sources": [{"url": f"https://www.google.com/search?q={encoded_q}", "title": "Google Search", "snippet": ""}],
-                    "query": query
-                }, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
-            raise ValueError("Google returned empty page")
-        except Exception as e2:
-            google_error = str(e2)
-            self.print(f"[web_search] 降级Google也失败: {e2}")
-            return StepOutcome({
-                "status": "error",
-                "msg": f"Grok失败, Google降级也失败: {e2}",
-                "grok_error": grok_error,
-                "google_error": google_error,
-                "grok_config_hint": "Configure grok2api_search_config in mykey.py or set GROK2API_APIBASE/GROK2API_API_KEY/GROK2API_MODEL.",
-            }, next_prompt="\n")
-
-    def do_image_generation(self, args, response):
-        '''通过 grok2api/OpenAI 兼容 /images/generations 端点生成图片，返回图片 URL。'''
-        import urllib.request, urllib.error, ssl as _ssl
-        from llmcore import reload_mykeys
-        prompt = (args.get("prompt") or "").strip()
-        if not prompt:
-            return StepOutcome({"status": "error", "msg": "prompt is required"}, next_prompt="\n")
-        model = args.get("model") or "grok-imagine-image-lite"
-        n = int(args.get("n") or 1)
-        size = args.get("size") or None
-        extra = args.get("extra") or {}
-        if not isinstance(extra, dict):
-            extra = {}
-
-        mykeys, _ = reload_mykeys()
-        cfg = (
-            mykeys.get("grok2api_image_config")
-            or mykeys.get("grok2api_config")
-            or {}
-        )
-        def _usable_secret(value):
-            value = str(value or "").strip()
-            lowered = value.lower()
-            if lowered in {"", "changeme", "your-api-key", "your_api_key", "<your-grok2api-key>", "sk-<your-grok2api-key>"}:
-                return ""
-            if "<your-" in lowered:
-                return ""
-            return value
-        def _format_error(err):
-            if isinstance(err, urllib.error.HTTPError):
-                try:
-                    body = err.read().decode("utf-8", errors="replace").strip()
-                except Exception:
-                    body = ""
-                msg = f"HTTP {err.code} {err.reason}"
-                if body:
-                    msg += f": {smart_format(body, max_str_len=700)}"
-                return msg
-            return f"{type(err).__name__}: {err}"
-
-        apibase = (cfg.get("apibase") or os.environ.get("GROK2API_IMAGE_APIBASE") or os.environ.get("GROK2API_APIBASE") or "https://grok.obxunil.eu.cc/v1").rstrip("/")
-        endpoint = apibase if apibase.endswith("/images/generations") else f"{apibase}/images/generations"
-        apikey = (
-            _usable_secret(cfg.get("apikey"))
-            or _usable_secret(cfg.get("api_key"))
-            or _usable_secret(os.environ.get("GROK2API_IMAGE_API_KEY"))
-            or _usable_secret(os.environ.get("GROK2API_API_KEY"))
-            or "123"
-        )
-        model = cfg.get("model") or os.environ.get("GROK2API_IMAGE_MODEL") or model
-        body = {"model": model, "prompt": prompt, "n": n}
-        if size:
-            body["size"] = size
-        body.update(extra)
-        payload = json.dumps(body).encode("utf-8")
-        ctx = _ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE
-        req = urllib.request.Request(
-            endpoint,
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {apikey}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            },
-            method="POST"
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=180, context=ctx) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            images = data.get("data", []) if isinstance(data, dict) else []
-            urls = [item.get("url") for item in images if isinstance(item, dict) and item.get("url")]
-            b64_items = [item.get("b64_json") for item in images if isinstance(item, dict) and item.get("b64_json")]
-            if not urls and not b64_items:
-                raise ValueError(f"image API returned no image data: {smart_format(data, max_str_len=700)}")
-            self.print(f"[image_generation] Grok图片生成成功: {prompt[:80]}")
-            return StepOutcome({
-                "status": "success",
-                "channel": "grok2api_images",
-                "prompt": prompt,
-                "model": model,
-                "urls": urls,
-                "b64_json_count": len(b64_items),
-                "raw": data,
-            }, next_prompt=self._get_anchor_prompt(skip=args.get('_index', 0) > 0))
-        except Exception as e:
-            err = _format_error(e)
-            self.print(f"[image_generation] Grok图片生成失败: {err}")
-            return StepOutcome({
-                "status": "error",
-                "msg": err,
-                "config_hint": "Configure grok2api_image_config in mykey.py or set GROK2API_IMAGE_APIBASE/GROK2API_IMAGE_API_KEY/GROK2API_IMAGE_MODEL; falls back to GROK2API_APIBASE/GROK2API_API_KEY.",
-            }, next_prompt="\n")
-    
     def do_file_patch(self, args, response):
         path = self._get_abs_path(args.get("path", ""))
         yield f"[Action] Patching file: {path}\n"
@@ -797,14 +384,6 @@ class GenericAgentHandler(BaseHandler):
         except ValueError as e:
             yield f"[Status] ❌ 引用展开失败: {e}\n"
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
-        policy = self._file_policy()
-        decision = policy.evaluate("patch", path)
-        policy.log_event("patch", path, decision, extra={"tool": "file_patch"})
-        if decision.action != "allow":
-            result = self._blocked_file_decision(decision, "patch")
-            yield f"[Status] ❌ 安全策略阻止 patch: {decision.reason}\n"
-            return StepOutcome(result, next_prompt="\n")
-        policy.backup_existing(path, reason="file_patch backup")
         result = file_patch(path, old_content, new_content)
         yield f"\n{str(result)}\n"
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
@@ -815,11 +394,6 @@ class GenericAgentHandler(BaseHandler):
         需要将要写入的内容放在<file_content>标签内，或者放在代码块中'''
         path = self._get_abs_path(args.get("path", ""))
         mode = args.get("mode", "overwrite")  # overwrite/append/prepend
-        valid_modes = {"overwrite", "append", "prepend"}
-        if mode not in valid_modes:
-            msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(valid_modes))}"
-            yield f"[Status] ❌ {msg}\n"
-            return StepOutcome({"status": "error", "msg": msg}, next_prompt="\n")
         action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
         yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
 
@@ -836,14 +410,6 @@ class GenericAgentHandler(BaseHandler):
             return StepOutcome({"status": "error", "msg": "No content found. Blank is not supported. Put content inside <file_content>...</file_content> tags in your reply body before call file_write."}, next_prompt="\n")
         try:
             new_content = expand_file_refs(content, base_dir=self.cwd)
-            operation = "overwrite" if mode == "overwrite" else mode
-            policy = self._file_policy()
-            decision = policy.evaluate(operation, path)
-            policy.log_event(operation, path, decision, extra={"tool": "file_write", "mode": mode})
-            if decision.action != "allow":
-                yield f"[Status] ❌ 安全策略阻止写入: {decision.reason}\n"
-                return StepOutcome(self._blocked_file_decision(decision, operation), next_prompt="\n")
-            policy.backup_existing(path, reason=f"file_write {mode} backup")
             if mode == "prepend":
                 old = open(path, 'r', encoding="utf-8").read() if os.path.exists(path) else ""
                 open(path, 'w', encoding="utf-8", newline=_file_newline(path)).write(new_content + old)
@@ -856,15 +422,6 @@ class GenericAgentHandler(BaseHandler):
         except Exception as e:
             yield f"[Status] ❌ 写入异常: {str(e)}\n"
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
-
-    def do_restore_quarantine(self, args, response):
-        quarantine_id = (args.get("quarantine_id") or "").strip()
-        if not quarantine_id:
-            return StepOutcome({"status": "error", "msg": "quarantine_id is required"}, next_prompt="\n")
-        result = self._file_policy().restore_quarantine(quarantine_id)
-        yield f"[Status] restore_quarantine: {result}\n"
-        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
-        return StepOutcome(result, next_prompt=next_prompt)
         
     def do_file_read(self, args, response):
         '''读取文件内容。从第start行开始读取。如有keyword则返回第一个keyword(忽略大小写)周边内容'''
@@ -897,9 +454,7 @@ class GenericAgentHandler(BaseHandler):
         return plan_path
     def _check_plan_completion(self):
         if not os.path.isfile(p:=self._in_plan_mode() or ''): return None
-        try:
-            with open(p, encoding='utf-8', errors='replace') as plan_file:
-                return len(re.findall(r'\[ \]', plan_file.read()))
+        try: return len(re.findall(r'\[ \]', open(p, encoding='utf-8', errors='replace').read()))
         except: return None
     
     def do_update_working_checkpoint(self, args, response):
@@ -916,125 +471,8 @@ class GenericAgentHandler(BaseHandler):
 
     def _retry_or_exit(self, prompt):
         self._empty_ct = getattr(self, '_empty_ct', 0) + 1
-        if self._empty_ct >= 3:
-            return StepOutcome({"reason": "EMPTY_RESPONSE_RETRY_EXHAUSTED", "attempts": self._empty_ct}, should_exit=True)
+        if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)
         return StepOutcome({}, next_prompt=prompt)
-
-    def _is_plan_deferred_completion(self, visible_content):
-        """Allow a completed scoped task to wait for a user decision without looping."""
-        visible = (visible_content or "").strip()
-        if not visible or self._has_incomplete_work_signal(visible):
-            return False
-        completed = re.search(
-            r"(任务(已)?完成|全部完成|已完成所有|已完成当前任务|当前任务已完成|"
-            r"修复完成|处理完成|已全部完成|完成了|搞定了)",
-            visible,
-            re.IGNORECASE,
-        )
-        awaiting_decision = re.search(
-            r"(?:请|等待|待|需要).{0,24}(?:用户|你|确认|批准|选择|回复)|"
-            r"(?:确认|批准|选择|回复).{0,24}(?:后|再|才能)|"
-            r"(?:Phase|阶段).{0,24}(?:确认|批准|选择)",
-            visible,
-            re.IGNORECASE,
-        )
-        return bool(completed and awaiting_decision)
-
-    def _is_verified_plan_completion(self, visible_content):
-        """End a verified scoped task even when its broader plan has later phases."""
-        visible = (visible_content or "").strip()
-        if not visible or self._has_incomplete_work_signal(visible):
-            return False
-        completed = re.search(
-            r"(任务(已)?完成|全部完成|已完成所有|已完成当前任务|当前任务已完成|"
-            r"修复完成|处理完成|已全部完成|完成了|搞定了)",
-            visible,
-            re.IGNORECASE,
-        )
-        verified = re.search(
-            r"(?:VERIFY|VERDICT)\s*[:：-]?\s*PASS|验证(?:通过|成功)|"
-            r"测试(?:全部|均)?通过",
-            visible,
-            re.IGNORECASE,
-        )
-        return bool(completed and verified)
-
-    def _has_recent_plan_verification(self):
-        recent = "\n".join(self.history_info[-8:]) if self.history_info else ""
-        return bool(re.search(
-            r"(?:VERIFY|VERDICT)\s*[:：-]?\s*PASS|验证(?:通过|成功)|"
-            r"测试(?:全部|均)?通过",
-            recent,
-            re.IGNORECASE,
-        ))
-
-    def _strip_courtesy_continue(self, visible):
-        """Drop polite closers like '有问题可以继续提问' so they don't block finish."""
-        text = visible or ""
-        return re.sub(
-            r"(?:如有|如果有|还有|若有)?(?:问题|疑问)?(?:的话)?(?:可以|可|请)?继续(?:提问|询问|问我|找我)|"
-            r"(?:随时|欢迎)(?:继续)?(?:提问|询问|问我)|"
-            r"(?:有需要|需要的话)(?:可以|可)?继续(?:说|问|找我)",
-            " ",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-    def _has_incomplete_work_signal(self, visible_content):
-        """True when the reply still announces more agent-side work to do."""
-        visible = self._strip_courtesy_continue(visible_content or "")
-        if not visible.strip():
-            return False
-        incomplete_re = re.compile(
-            r"(下一步|接下来|还需要|尚未|待办|TODO|TBD|正在|准备|"
-            r"先(?:做|改|查|读|写)|然后|稍后|未完成|incomplete|in progress|"
-            # bare 继续 / 继续排查/优化/分析/观察... but courtesy 继续提问 already stripped
-            r"继续(?!提问|询问|问我|找我)|"
-            r"will (?:now|next)|let me|I'll |I will )",
-            re.IGNORECASE,
-        )
-        return bool(incomplete_re.search(visible))
-
-    def _looks_like_final_no_tool_answer(self, visible_content):
-        """Decide whether a no-tool turn may end the whole agent run.
-
-        Long tasks frequently emit intermediate prose / status without tools.
-        Treating every visible no-tool reply as CURRENT_TASK_DONE aborts the run
-        mid-way and surfaces as an empty/failed desktop turn.
-        """
-        visible = (visible_content or "").strip()
-        if not visible:
-            return False
-
-        if self._in_plan_mode():
-            remaining = self._check_plan_completion()
-            if remaining is None:
-                return False
-            return remaining == 0
-
-        if self._has_incomplete_work_signal(visible):
-            return False
-
-        complete_re = re.compile(
-            r"(任务(已)?完成|全部完成|已完成所有|已完成当前任务|当前任务已完成|"
-            r"修复完成|处理完成|已全部完成|FINISHED|TASK[_\s-]?DONE|"
-            r"All done|Done\.|完成了|搞定了|🏁)",
-            re.IGNORECASE,
-        )
-        if complete_re.search(visible):
-            return True
-
-        # Mid long-run: require an explicit completion signal before ending.
-        recent = "\n".join(self.history_info[-12:]) if self.history_info else ""
-        mid_task = (
-            self.current_turn >= 3
-            or bool(self.working.get("key_info"))
-            or bool(self.working.get("related_sop"))
-            or ("[Agent]" in recent and "直接回答了用户问题" not in recent)
-        )
-        if mid_task:
-            return False
-        return True
 
     def do_no_tool(self, args, response):
         '''这是一个特殊工具，由引擎自主调用，不要包含在TOOLS_SCHEMA里。
@@ -1042,8 +480,6 @@ class GenericAgentHandler(BaseHandler):
         二次确认仅在回复几乎只包含<thinking>/<summary>和一段大代码块时触发。'''
         content = getattr(response, 'content', '') or ""
         thinking = getattr(response, 'thinking', '') or ""
-        visible_content = re.sub(r"<thinking>[\s\S]*?</thinking>", "", content, flags=re.IGNORECASE)
-        visible_content = re.sub(r"<summary>[\s\S]*?</summary>", "", visible_content, flags=re.IGNORECASE)
         if not response or (not content.strip() and not thinking.strip()):
             yield "[Warn] LLM returned an empty response. Retrying...\n"
             return self._retry_or_exit("[System] Blank response, regenerate and tooluse")
@@ -1052,7 +488,7 @@ class GenericAgentHandler(BaseHandler):
         if 'max_tokens !!!]' in content[-100:]:
             return self._retry_or_exit("[System] max_tokens limit reached. Use multi small steps to do it.")
         
-        if self._in_plan_mode() and self._check_plan_completion() == 0 and any(kw in content for kw in ['任务完成', '全部完成', '已完成所有', '🏁']) and not (self._is_verified_plan_completion(visible_content) or self._has_recent_plan_verification()):
+        if self._in_plan_mode() and any(kw in content for kw in ['任务完成', '全部完成', '已完成所有', '🏁']):
             if 'VERDICT' not in content and '[VERIFY]' not in content and '验证subagent' not in content:
                 yield "[Warn] Plan模式完成声明拦截。\n"
                 return StepOutcome({}, next_prompt="⛔ [验证拦截] 检测到你在plan模式下声称完成，但未执行[VERIFY]验证步骤。请先按plan_sop §四启动验证subagent，获得VERDICT后才能声称完成。")
@@ -1083,39 +519,7 @@ class GenericAgentHandler(BaseHandler):
         if self._in_plan_mode():
             remaining = self._check_plan_completion()
             if remaining == 0:
-                # A zero-open-item plan is the completion signal.  The final
-                # verification reply need not repeat a completion phrase.
-                verified = self._has_recent_plan_verification() or bool(re.search(
-                    r"(?:VERIFY|VERDICT)\s*[:：-]?\s*PASS|验证(?:通过|成功)|"
-                    r"测试(?:全部|均)?通过",
-                    visible_content,
-                    re.IGNORECASE,
-                ))
                 self._exit_plan_mode(); yield "[Info] Plan完成：plan.md中0个[ ]残留，退出plan模式。\n"
-                if verified:
-                    yield "[Info] Recent plan verification passed; finalizing without another no-tool turn.\n"
-                    return StepOutcome(response, next_prompt=None)
-            elif remaining is not None and remaining > 0:
-                if self._is_plan_deferred_completion(visible_content) or self._is_verified_plan_completion(visible_content):
-                    yield "[Info] Scoped plan task completed; preserving remaining plan steps for a later user instruction.\n"
-                    return StepOutcome(response, next_prompt=None)
-                yield "[Info] Plan still has open tasks; continue instead of finalizing no-tool turn.\n"
-                next_prompt = (
-                    f"[System] 当前仍在 plan 模式，plan 中还有 {remaining} 个未完成项 [ ]。"
-                    "本轮未调用工具，不能结束任务。请 file_read plan 文件确认当前步骤并继续执行工具推进。\n"
-                )
-                next_prompt += self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
-                return StepOutcome({"result": "PLAN_INCOMPLETE_CONTINUE"}, next_prompt=next_prompt)
-
-        if not self._looks_like_final_no_tool_answer(visible_content):
-            yield "[Info] Intermediate no-tool reply detected; keep running the task.\n"
-            next_prompt = (
-                "[System] 你本轮没有调用任何工具。长任务中途的状态说明不能结束整轮执行。\n"
-                "若任务尚未完成：请立即调用工具继续推进（file_read/file_patch/code_run 等）。\n"
-                "若任务确实已完成：请给出面向用户的最终结论，并明确写清“任务完成/已完成”。\n"
-            )
-            next_prompt += self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
-            return StepOutcome({"result": "NO_TOOL_CONTINUE"}, next_prompt=next_prompt)
         
         #yield "[Info] Final response to user.\n"
         return StepOutcome(response, next_prompt=None)
