@@ -380,10 +380,11 @@ def _stamp_oai_cache_markers(messages, model):
 
 def _stream_with_retry(sess, url, headers, payload, parse_fn):
     _RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 529}
+    cap = float(getattr(sess, 'max_retry_after', 60.0))
     def _delay(resp, attempt):
         try: ra = float((resp.headers or {}).get("retry-after"))
         except: ra = None
-        return max(0.5, ra if ra is not None else min(30.0, 1.5 * (2 ** attempt)))
+        return None if ra and ra > cap else max(0.5, ra or min(30.0, 1.5 * (2 ** attempt)))
     for attempt in range(sess.max_retries + 1):
         streamed = False
         try:
@@ -391,13 +392,13 @@ def _stream_with_retry(sess, url, headers, payload, parse_fn):
                                timeout=(sess.connect_timeout, sess.read_timeout), proxies=sess.proxies, verify=sess.verify) as r:
                 if r.status_code >= 400:
                     #pathlib.Path(__file__).parent.joinpath('temp','bad_requests.json').write_text(json.dumps({"url":url,"headers":headers,"payload":payload,"t":time.time()},ensure_ascii=False),encoding='utf-8')
-                    if r.status_code in _RETRYABLE and attempt < sess.max_retries:
-                        d = _delay(r, attempt)
+                    d = _delay(r, attempt) if r.status_code in _RETRYABLE and attempt < sess.max_retries else None
+                    if d is not None:
                         print(f"[LLM Retry] HTTP {r.status_code}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})")
                         time.sleep(d); continue
                     try: body = r.text.strip()[:500]
                     except: body = ""
-                    err = f"!!!Error: HTTP {r.status_code}" + (f": {body}" if body else "")
+                    err = f"!!!Error: HTTP {r.status_code}" + (f" (retry-after > {cap:.0f}s)" if d is None and r.status_code in _RETRYABLE and attempt < sess.max_retries else "") + (f": {body}" if body else "")
                     yield err; return [{"type": "text", "text": err}]
                 gen = parse_fn(r)
                 try:
@@ -560,6 +561,7 @@ class BaseSession:
         proxy = cfg.get('proxy'); 
         self.proxies = {"http": proxy, "https": proxy} if proxy else None
         self.max_retries = max(0, int(cfg.get('max_retries', 4)))
+        self.max_retry_after = float(cfg.get('max_retry_after', 60.0))
         self.verify = cfg.get('verify', True)
         self.stream = cfg.get('stream', True)
         default_ct, default_rt = (5, 40) if self.stream else (10, 240)
@@ -588,7 +590,7 @@ class BaseSession:
                     thinking["budget_tokens"] = self.thinking_budget_tokens; payload["thinking"] = thinking
             else: payload["thinking"] = thinking
         if self.reasoning_effort:
-            effort = {'low': 'low', 'medium': 'medium', 'high': 'high', 'xhigh': 'max'}.get(self.reasoning_effort)
+            effort = {'low': 'low', 'medium': 'medium', 'high': 'high', 'xhigh': 'max', 'max': 'max'}.get(self.reasoning_effort)
             if effort: payload["output_config"] = {"effort": effort}
             else: print(f"[WARN] reasoning_effort {self.reasoning_effort!r} is unsupported for Claude output_config.effort, ignored.")
     def ask(self, prompt):
@@ -659,7 +661,7 @@ def _fix_messages(messages):
         if m.get('role') not in ('user', 'assistant'): continue
         blocks = W(m.get('content', []))
         if merged and m['role'] == merged[-1]['role']:
-            merged[-1]['content'] += [{"type": "text", "text": "\n"}] + blocks
+            merged[-1]['content'] += list(blocks)
         else:
             merged.append({"role": m['role'], "content": list(blocks)})
     while merged and merged[0]['role'] != 'user': merged.pop(0)
@@ -685,6 +687,7 @@ def _fix_messages(messages):
                 else: rest.append(b)
             m['content'] = [got.get(u) or {"type": "tool_result", "tool_use_id": u, "content": "(error)"} for u in prev_uses] + rest
             prev_uses = []
+    for m in merged: m['content'] = [b for b in m['content'] if not (isinstance(b, dict) and b.get('type') == 'text' and not (b.get('text') or '').strip())] or [{"type": "text", "text": "."}]
     return merged
 
 class NativeClaudeSession(BaseSession):
