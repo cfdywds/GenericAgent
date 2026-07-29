@@ -81,8 +81,8 @@ class GenericAgent:
     def load_llm_sessions(self):
         mykeys, changed = reload_mykeys()
         if not changed and hasattr(self, 'llmclients'): return
-        try: oldhistory = self.llmclient.backend.history
-        except: oldhistory = None
+        try: oldhistory, oldname = self.llmclient.backend.history, self.llmclient.backend.name
+        except: oldhistory = oldname = None
         llm_sessions = []
         for k, cfg in mykeys.items():
             if not any(x in k for x in ['api', 'config', 'cookie']): continue
@@ -104,6 +104,8 @@ class GenericAgent:
         if not self.llmclients:
             self.llmclient = None
             return
+        names = [c.backend.name if not isinstance(c, dict) else f'BADMIXIN_{i}' for i, c in enumerate(self.llmclients)]
+        if oldname in names: self.llm_no = names.index(oldname)
         self.llm_no %= len(self.llmclients)
         self.llmclient = self.llmclients[self.llm_no]
         if oldhistory: self.llmclient.backend.history = oldhistory
