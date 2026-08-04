@@ -60,14 +60,6 @@ COMMANDS = {
         "desc": "启动 hub 前端管理面板（系统托盘 + 浏览器界面）",
         "cmd": ["python", "{PROJECT_DIR}/hub.pyw"],
     },
-    "web": {
-        "help": "启动 Web 增强版 (stapp2)",
-        "desc": "启动 Streamlit Web 增强版；--native 使用 pywebview 桌面壳",
-        "cmd": ["python", "{FRONTENDS}/stapp2.py"],
-        "flags": {
-            "--native": {"cmd": ["python", "{PROJECT_DIR}/launch.pyw"]},
-        },
-    },
     "tui": {
         "help": "启动终端 TUI (tuiapp)",
         "desc": "启动终端图形界面（Textual），适合纯终端环境或 SSH",
@@ -87,11 +79,6 @@ COMMANDS = {
         "help": "启动 webview 桌面壳 (launch.pyw)",
         "desc": "以原生窗口形式包装 stapp Web 界面（基于 pywebview）",
         "cmd": ["python", "{PROJECT_DIR}/launch.pyw"],
-    },
-    "pet": {
-        "help": "启动 2D 桌面宠物 v2",
-        "desc": "启动 desktop_pet_v2 2D 桌面宠物前端",
-        "cmd": ["python", "{FRONTENDS}/desktop_pet_v2.pyw"],
     },
     "status": {
         "help": "检查运行状态",
@@ -171,7 +158,7 @@ def main():
               ga web --native      启动 Web 基础版(桌面壳)
               ga tui               启动终端 TUI (v1)
               ga tui2              启动终端 TUI (v2 增强版)
-              ga pet               启动 2D 桌面宠物 v2
+              ga pet               启动桌面宠物 v2
               ga launch            启动 webview 桌面壳
               ga list              列出所有命令
         """),

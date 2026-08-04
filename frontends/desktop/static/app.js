@@ -93,16 +93,10 @@ let bridgeUiOffline = false;
     if (!invoke) throw new Error('Tauri IPC is not available');
     return invoke(name, args);
   };
-  let bridgeToken = window.GA_BRIDGE_BOOTSTRAP_TOKEN || null;
-  const stateChangingMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
   async function http(path, options = {}) {
     const headers = Object.assign({}, options.headers || {});
     const init = Object.assign({}, options, { headers });
-    const method = (init.method || 'GET').toUpperCase();
-    if (bridgeToken && stateChangingMethods.has(method)) {
-      headers['X-GA-Bridge-Token'] = headers['X-GA-Bridge-Token'] || bridgeToken;
-    }
     if (init.body && typeof init.body !== 'string') {
       headers['Content-Type'] = headers['Content-Type'] || 'application/json';
       init.body = JSON.stringify(init.body);
@@ -274,7 +268,6 @@ let bridgeUiOffline = false;
 
   window.ga = {
     platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32',
-    bridgeToken,
     startBridge: async () => { connectWs(); return http('/status'); },
     spawnBridge,
     stopBridge: async () => ({ ok: true }),
@@ -320,7 +313,7 @@ let bridgeUiOffline = false;
 /* ═══════════════ i18n ═══════════════ */
 const I18N = window.GA_I18N?.dict || { zh: {}, en: {} };
 const LANGS = window.GA_I18N?.languages || ['zh', 'en'];
-const STORE = { lang: 'ga_lang', theme: 'ga_theme', appearance: 'ga_appearance', plain: 'ga_plain', fontSize: 'ga_font_size', llmNo: 'ga_llm_no' };
+const STORE = { lang: 'ga_lang', theme: 'ga_theme', appearance: 'ga_appearance', plain: 'ga_plain', fontSize: 'ga_font_size' };
 const APPEARANCE_IDS = ['light', 'dark'];
 const CHAT_FONT_MIN = 10;
 const CHAT_FONT_MAX = 20;
@@ -376,19 +369,14 @@ const bridgeHost = () => BRIDGE_ORIGIN;
 async function bridgeFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
   const init = { ...opts, headers };
-  const method = (init.method || 'GET').toUpperCase();
-  if (window.ga?.bridgeToken && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
-    headers['X-GA-Bridge-Token'] = headers['X-GA-Bridge-Token'] || window.ga.bridgeToken;
-  }
   if (init.body && typeof init.body !== 'string') {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(init.body);
   }
   const res = await fetch(`${bridgeHost()}${path}`, init);
-  const text = await res.text();
   let data = {};
-  try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
-  if (!res.ok) throw new Error(data.error || data.message || data.raw || res.statusText);
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) throw new Error(data.error || data.message || res.statusText);
   return data;
 }
 function t(key, vars) {
@@ -787,7 +775,17 @@ if (pqEl) pqEl.addEventListener('click', (e) => {
   const btn = e.target.closest('.pq-btn[data-provider]');
   if (!btn) return;
   e.preventDefault(); e.stopPropagation();
-  if (btn.dataset.provider === 'ga-token') { bridgeFetch('/subscription-portal', { method: 'POST', body: {} }); return; }
+  if (btn.dataset.provider === 'ga-token') {
+    window.ga.getMykeyContent().then(r => {
+      const base = r?.content || '', t0 = Date.now();
+      bridgeFetch('/subscription-portal', { method: 'POST', body: {} });
+      const timer = setInterval(async () => {
+        const cur = (await window.ga.getMykeyContent().catch(() => null))?.content;
+        if ((cur != null && cur !== base) || Date.now() - t0 > 3e5) { clearInterval(timer); if (cur !== base) await loadModelProfiles(); }
+      }, 3000);
+    });
+    return;
+  }
   openAddModelFormForProvider(btn.dataset.provider);
 });
 // 「快速接入」卡片折叠/展开（向下箭头），状态记忆到 localStorage
@@ -877,130 +875,8 @@ if (typeof marked !== 'undefined') {
   marked.setOptions({ gfm: true, breaks: true, mangle: false, headerIds: false });
 }
 const ALLOWED_URI_RE = /^(https?:|mailto:|tel:|#|\/)/i;
-const ALLOWED_IMG_SRC_RE = /^(https?:|data:image\/(?:png|jpe?g|gif|webp|bmp|svg\+xml);base64,|blob:|#|\/)/i;
 function escapeHtml(s) {
   const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML;
-}
-function isSafeMarkdownImgSrc(src) {
-  const v = String(src || '').trim();
-  if (!v) return false;
-  if (ALLOWED_IMG_SRC_RE.test(v)) return true;
-  if (/^(?:[A-Za-z]:[\\/]|\\\\|\.\.?[\\/])/.test(v)) return true;
-  return false;
-}
-function normalizeMarkdownImgSrc(src) {
-  const v = String(src || '').trim();
-  if (!v) return '';
-  if (/^(?:[A-Za-z]:[\\/]|\\\\|\.\.?[\\/])/.test(v)) return uploadRawUrl(v);
-  return v;
-}
-function allowMarkdownUri(el, attrName, value) {
-  const n = String(attrName || '').toLowerCase();
-  const v = String(value || '').trim();
-  if (!v) return true;
-  if (el?.tagName === 'IMG' && n === 'src') return isSafeMarkdownImgSrc(v);
-  return ALLOWED_URI_RE.test(v);
-}
-function isLikelyMarkdownImageUrl(url) {
-  const raw = String(url || '').trim();
-  if (!/^https?:\/\//i.test(raw)) return false;
-  try {
-    const u = new URL(raw);
-    const path = u.pathname.toLowerCase();
-    if (/\.(?:png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(path)) return true;
-    // Many image-generation endpoints return signed URLs without a file extension.
-    // Examples: /v1/files/image?id=..., /v1/images/generations, /image/...
-    if (/(?:^|\/)(?:image|images|img|file|files|generated-images?|generations?)(?:\/|$)/i.test(path)) return true;
-    if (/\/(?:files\/image|images\/generations)(?:\/|$)/i.test(path)) return true;
-  } catch (_) {}
-  return false;
-}
-function cleanMarkdownImageUrl(url) {
-  let clean = String(url || '').trim()
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-  while (/[),.;!?]$/.test(clean) && !/[/?#][^\s]*[),.;!?]$/.test(clean)) clean = clean.slice(0, -1);
-  return clean;
-}
-function extractLikelyMarkdownImageUrls(text) {
-  const out = [];
-  const seen = new Set();
-  const add = (url) => {
-    const clean = cleanMarkdownImageUrl(url);
-    if (isLikelyMarkdownImageUrl(clean) && !seen.has(clean)) {
-      seen.add(clean);
-      out.push(clean);
-    }
-  };
-  // Markdown image/link syntax first, including URLs inside JSON strings rendered in <pre>.
-  String(text || '').replace(/!\[[^\]\n]*\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (m, url) => { add(url); return m; });
-  const urlRe = /(^|[\s([{:=,"'])((?:https?:\/\/)[^\s<>()"']+)(?=\s|$|[\])}.,;!?"'])/g;
-  String(text || '').replace(urlRe, (m, pre, url) => { add(url); return m; });
-  return out;
-}
-function autoEmbedMarkdownImageUrls(text) {
-  let s = String(text || '');
-  const slots = [];
-  const protect = (re) => { s = s.replace(re, (m) => { const id = slots.length; slots.push(m); return `\x00MDIMG:${id}\x00`; }); };
-  protect(/```[\s\S]*?```/g);
-  protect(/`[^`\n]+`/g);
-  protect(/!\[[^\]\n]*\]\([^\s)]+(?:\s+"[^"]*")?\)/g);
-  protect(/\[[^\]\n]+\]\([^\s)]+(?:\s+"[^"]*")?\)/g);
-  const urlRe = /(^|[\s([{:=,"'])((?:https?:\/\/)[^\s<>()"']+)(?=\s|$|[\])}.,;!?"'])/g;
-  s = s.replace(urlRe, (m, pre, url) => {
-    let clean = url;
-    let tail = '';
-    while (/[),.;!?]$/.test(clean) && !/[/?#][^\s]*[),.;!?]$/.test(clean)) {
-      tail = clean.slice(-1) + tail;
-      clean = clean.slice(0, -1);
-    }
-    if (!isLikelyMarkdownImageUrl(clean)) return m;
-    return `${pre}![image](${clean})${tail}`;
-  });
-  return s.replace(/\x00MDIMG:(\d+)\x00/g, (_, i) => slots[Number(i)] || '');
-}
-function renderedImageSrcSet(html) {
-  const out = new Set();
-  const add = (url) => {
-    const clean = cleanMarkdownImageUrl(url);
-    if (clean) out.add(clean);
-  };
-  try {
-    if (typeof document !== 'undefined' && document.createElement) {
-      const tpl = document.createElement('template');
-      if (tpl.content && typeof tpl.content.querySelectorAll === 'function') {
-        tpl.innerHTML = String(html || '');
-        tpl.content.querySelectorAll('img').forEach(img => add(img.getAttribute('src') || ''));
-        return out;
-      }
-    }
-  } catch (_) {}
-  const raw = String(html || '');
-  raw.replace(/<img\b[^>]*\bsrc\s*=\s*(['"])(.*?)\1/gi, (m, q, src) => { add(src); return m; });
-  raw.replace(/<img\b[^>]*\bsrc\s*=\s*([^\s"'=<>`]+)/gi, (m, src) => { add(src); return m; });
-  return out;
-}
-function renderToolResultImagePreviews(body, skipUrls) {
-  const skip = new Set();
-  for (const url of (skipUrls || [])) {
-    const clean = cleanMarkdownImageUrl(url);
-    if (clean) skip.add(clean);
-  }
-  const urls = extractLikelyMarkdownImageUrls(body).filter(url => !skip.has(cleanMarkdownImageUrl(url)));
-  if (!urls.length) return '';
-  const imgs = urls.map((url, i) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><img src="${escapeHtml(url)}" alt="generated image ${i + 1}" loading="lazy"></a>`).join('');
-  return `<div class="tool-result-images">${imgs}</div>`;
-}
-function renderTurnBodyWithImageFallback(body) {
-  const html = renderTurnBody(body);
-  // renderTurnBody intentionally protects fenced code blocks. Tool stdout often
-  // contains JSON like {"urls":["https://.../v1/files/image?id=..."]}; add a
-  // turn-level fallback so generated images inside stdout still show up.
-  const fallback = renderToolResultImagePreviews(body, renderedImageSrcSet(html));
-  return fallback ? `${html}${fallback}` : html;
 }
 /** GA list_llms 形如 SessionClass/备注；桌面 UI 只展示 / 后一段 */
 function profileLabel(name) {
@@ -1023,8 +899,7 @@ function sanitizeMarkdown(html) {
     for (const attr of Array.from(el.attributes)) {
       const n = attr.name.toLowerCase(), v = attr.value.trim();
       if (n.startsWith('on') || n === 'srcdoc') { el.removeAttribute(attr.name); continue; }
-      if ((n === 'href' || n === 'src' || n === 'xlink:href') && !allowMarkdownUri(el, n, v)) { el.removeAttribute(attr.name); continue; }
-      if (el.tagName === 'IMG' && n === 'src') el.setAttribute(attr.name, normalizeMarkdownImgSrc(v));
+      if ((n === 'href' || n === 'src' || n === 'xlink:href') && v && !ALLOWED_URI_RE.test(v)) el.removeAttribute(attr.name);
     }
     if (el.tagName === 'A') { el.setAttribute('rel','noopener noreferrer'); el.setAttribute('target','_blank'); }
   }
@@ -1097,8 +972,7 @@ function restoreLatex(html) {
 function renderMarkdown(text) {
   if (typeof marked === 'undefined') return escapeHtml(text).replace(/\n/g, '<br>');
   try {
-    const autoImageText = autoEmbedMarkdownImageUrls(String(text || ''));
-    const protected_ = protectLatex(autoImageText);
+    const protected_ = protectLatex(String(text || ''));
     let html = sanitizeMarkdown(marked.parse(protected_));
     html = restoreLatex(html);
     // TUI 风格代码块：包装 pre>code 为 .code-block 容器 + 语言头
@@ -1340,8 +1214,7 @@ function renderTurnBody(body) {
       const f = folds[Number(i)];
       if (!f) return '';
       const openAttr = f.open ? ' open' : '';
-      const previews = String(f.cls || '').includes('fold-result') ? renderToolResultImagePreviews(f.body) : '';
-      return `<details class="fold ${f.cls}"${openAttr}><summary>${escapeHtml(f.label)}</summary><pre class="fold-pre">${escapeHtml(f.body)}</pre>${previews}</details>`;
+      return `<details class="fold ${f.cls}"${openAttr}><summary>${escapeHtml(f.label)}</summary><pre class="fold-pre">${escapeHtml(f.body)}</pre></details>`;
     });
   return html;
 }
@@ -1367,7 +1240,7 @@ function renderTurnFold(body, turnIndex) {
   const raw = stripTurnMarker(body);
   const sum = extractTurnSummaryPure(raw);
   const bodyForRender = sum ? raw.replace(/<summary>[\s\S]*?<\/summary>\s*/i, '') : raw;
-  const inner = renderTurnBodyWithImageFallback(bodyForRender);
+  const inner = renderTurnBody(bodyForRender);
   const turnLabel = t('fold.turn').replace('{n}', turnDisplayNo(turnIndex));
   const head = sum
     ? `${escapeHtml(turnLabel)}：<span class="turn-head-sum">${escapeHtml(sum)}</span>`
@@ -1431,10 +1304,6 @@ function parseAskUserJson(raw) {
   return null;
 }
 
-function isLocalPath(path) {
-  return /^(?:[A-Za-z]:[\\/]|\\\\|\.\.?[\\/]|~[\\/]|\/(?!\/))/.test(String(path || '').trim());
-}
-
 function normalizeAskUserData(data) {
   const raw = data || {};
   const question = String(raw.question || '').trim();
@@ -1443,12 +1312,7 @@ function normalizeAskUserData(data) {
   const candidates = Array.isArray(cs)
     ? cs.map(x => String(x == null ? '' : x)).filter(x => x.trim())
     : [];
-  const images = Array.isArray(raw.images) ? raw.images.map(image => {
-    const path = String(image?.path || '').trim();
-    if (!isLocalPath(path) || !/\.(?:png|jpe?g|gif|webp|bmp)$/i.test(path)) return null;
-    return { name: String(image?.name || path.split(/[\\/]/).pop() || 'image'), path };
-  }).filter(Boolean) : [];
-  return { question, candidates, images };
+  return { question, candidates };
 }
 
 /** 格式化 ask_user 题干：编号与正文同行；无空行时在 2./3. 前分段 */
@@ -1485,19 +1349,18 @@ function markAskOptionHtml(html) {
   return out;
 }
 
-/** Do not flatten ambiguous multi-question candidates into one action group. */
-function shouldOfferAskChoices(item) {
+/** 预览模式：true = 始终显示 candidates；false = 题干已含选项/多题时不重复渲染底部列表 */
+const ASK_USER_ALWAYS_SHOW_CANDIDATES = false;
+
+/** 题干已含选项/多题，或 candidates 无法与题干对应时，不再重复渲染底部列表 */
+function shouldShowAskCandidates(item) {
   if (!item || !item.candidates.length) return false;
+  if (ASK_USER_ALWAYS_SHOW_CANDIDATES) return true;
   const q = item.question;
   if (/两个问题|多个问题|两道|两题/.test(q)) return false;
   if ((q.match(/问题\s*\d/gi) || []).length >= 2) return false;
+  if ((q.match(/^[ \t]*\d+[.、:：)]\s+/gm) || []).length >= 2) return false;
   if ((q.match(/^[ \t]*[A-Da-d][.)]\s/mg) || []).length >= 2) return false;
-  const questionCount = (q.match(/[？?]/g) || []).length;
-  if (questionCount >= 2) return false;
-  if (questionCount === 0) {
-    const numbered = q.match(/^[ \t]*(?:[（(]\s*\d+\s*[）)]|\d+\s*[.)）、:：]|[一二三四五六七八九十]+\s*[、.．]|问题\s*\d+)/gm) || [];
-    if (numbered.length >= 2) return false;
-  }
   const comboN = item.candidates.filter(c => /\d+[A-Da-d]\s*\+\s*\d+[A-Da-d]/i.test(c)).length;
   if (comboN >= Math.max(1, Math.ceil(item.candidates.length * 0.5))) return false;
   // 题干里有多道问句，却把全部选项平铺在 candidates → 无法区分归属，不展示
@@ -1507,42 +1370,38 @@ function shouldOfferAskChoices(item) {
 }
 
 
-function renderAskUserNotice(data, { showImages = false } = {}) {
+function renderAskUserNotice(data) {
   const item = normalizeAskUserData(data);
   if (!item) return '';
-  const qHtml = markAskOptionHtml(renderMarkdown(formatAskUserQuestion(item.question)));
-  const hint = askUserActionChoices(item).length ? askUserChoiceHint() : t('ask.replyHint');
+  // 单题与多题统一处理：多题的选项本就内联在题干里；单题的选项放在 candidates 里，
+  // 这里把它折叠进题干，按同样的 A./B./C. 内联方式渲染，不再单独画一个编号列表。
+  const question = foldAskCandidates(item);
+  const qHtml = markAskOptionHtml(renderMarkdown(formatAskUserQuestion(question)));
   return `<div class="ask-user-notice" data-ask-user="1">
     <div class="ask-user-banner">
       <span class="ask-user-banner-text">${escapeHtml(t('ask.banner'))}</span>
       <span class="ask-user-banner-sep" aria-hidden="true">·</span>
-      <span class="ask-user-banner-hint">${escapeHtml(hint)}</span>
+      <span class="ask-user-banner-hint">${escapeHtml(t('ask.replyHint'))}</span>
     </div>
     ${qHtml ? `<div class="ask-user-body md">${qHtml}</div>` : ''}
-    ${showImages && item.images.length ? `<div class="ask-user-images">${item.images.map(image => `
-      <figure class="ask-user-image">
-        <img src="${escapeHtml(uploadRawUrl(image.path))}" alt="${escapeHtml(image.name)}" loading="eager">
-        <figcaption>${escapeHtml(image.name)}</figcaption>
-      </figure>`).join('')}</div>` : ''}
   </div>`;
 }
 
-function askUserChoiceHint() {
-  const hint = t('ask.replyHintChoices');
-  if (hint !== 'ask.replyHintChoices') return hint;
-  return lang === 'en' ? 'Choose an action below or reply directly' : '选择下方操作或直接回复';
-}
-
-function askUserActionChoices(item) {
-  if (!item) return [];
-  if (shouldOfferAskChoices(item)) {
-    return item.candidates.map(label => ({ label, primary: false }));
-  }
-  return [];
+/** 单题的 candidates 折叠进题干（统一成 A./B./C. 内联选项）；多题或无法对应时原样返回题干 */
+function foldAskCandidates(item) {
+  if (!shouldShowAskCandidates(item)) return item.question;
+  const opts = item.candidates.map((c, j) => {
+    const label = String(c).replace(/^\s*(?:[A-Za-z]|\d{1,2})\s*[.)、:：]\s*/, '').trim();
+    return `${String.fromCharCode(65 + j)}. ${label}`;
+  }).join('\n');
+  // 用单换行（而非空行）拼进题干，让题干+选项渲染成同一个 <p>，每个选项都跟在 <br> 后面 —
+  // 与多题内联选项走完全一致的 .ask-option-line 缩进，避免首项 A 贴左边、B/C/D 缩进的错位。
+  return item.question.replace(/\s+$/, '') + '\n' + opts;
 }
 
 function askUserPlaceholder(item) {
-  return askUserActionChoices(item).length ? t('ask.placeholderChoice') : t('ask.placeholderOpen');
+  // 单题与多题统一：都用自由作答提示，不再针对单题单独显示「输入 1/2/3 选择」
+  return t('ask.placeholderOpen');
 }
 
 function assistantStructuredText(msg) {
@@ -1553,8 +1412,6 @@ function assistantStructuredText(msg) {
 
 function getPendingAskUser(sess) {
   if (!sess || rt(sess).busy) return null;
-  const structured = normalizeAskUserData(sess.pendingInput);
-  if (structured) return structured;
   const msgs = sess.messages || [];
   let lastAskIdx = -1;
   let askData = null;
@@ -1575,7 +1432,6 @@ function getPendingAskUser(sess) {
 function syncAskUserUi() {
   const sess = activeSess();
   const pending = sess ? getPendingAskUser(sess) : null;
-  renderPendingAskUserCard(pending);
   const notices = [...document.querySelectorAll('.ask-user-notice')];
   notices.forEach((el, i) => {
     const isLast = i === notices.length - 1;
@@ -1584,69 +1440,6 @@ function syncAskUserUi() {
   });
   if (inputEl) inputEl.setAttribute('data-ph', pending ? askUserPlaceholder(pending) : t('composer.placeholder'));  // contenteditable 用 data-ph（无 placeholder 属性）
   if (composerEl) composerEl.classList.toggle('is-awaiting-answer', !!pending);
-}
-
-function pendingAskUserSignature(item) {
-  if (!item) return '';
-  const images = (item.images || []).map(image => `${image.name}\0${image.path}`).join('\n');
-  const candidates = (item.candidates || []).join('\n');
-  return `${lang}\0${item.question}\0${candidates}\0${images}`;
-}
-
-function renderPendingAskUserCard(item) {
-  let panel = document.getElementById('pending-ask-user');
-  const choices = askUserActionChoices(item);
-  if (!item || (!choices.length && !item.images.length)) {
-    panel?.remove();
-    return;
-  }
-  const signature = pendingAskUserSignature(item);
-  const existed = !!panel;
-  if (!panel) {
-    panel = document.createElement('section');
-    panel.id = 'pending-ask-user';
-    panel.className = 'ask-user-pinned';
-  }
-  if (panel.dataset.signature === signature && document.getElementById('pending-ask-user')) return;
-  panel.dataset.signature = signature;
-  panel.textContent = '';
-  if (item.images.length) {
-    const images = document.createElement('div');
-    images.className = 'ask-user-images';
-    for (const image of item.images) {
-      const figure = document.createElement('figure');
-      figure.className = 'ask-user-image';
-      const preview = document.createElement('img');
-      preview.src = uploadRawUrl(image.path);
-      preview.alt = image.name;
-      preview.loading = 'eager';
-      const caption = document.createElement('figcaption');
-      caption.textContent = image.name;
-      figure.append(preview, caption);
-      images.appendChild(figure);
-    }
-    panel.appendChild(images);
-  }
-  if (choices.length) {
-    const actions = document.createElement('div');
-    actions.className = 'ask-user-actions';
-    actions.setAttribute('aria-label', t('ask.actionsLabel'));
-    for (const choice of choices) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'ask-user-choice' + (choice.primary ? ' is-primary' : '');
-      button.textContent = choice.label;
-      button.addEventListener('click', () => {
-        const sess = activeSess();
-        if (!sess || !inputEl || _submitInFlight || rt(sess).busy) return;
-        void submitInput({ replyText: choice.label });
-      });
-      actions.appendChild(button);
-    }
-    panel.appendChild(actions);
-  }
-  ensureMsgs().appendChild(panel);
-  if (!existed) scrollBottom(true);
 }
 
 /* ═══════════════ 渲染后增强 (PR移植) ═══════════════ */
@@ -2353,7 +2146,7 @@ function renderAssistantTurnsHtml(segs, currTurn, withCursor = false) {
   for (let i = first; i < curr; i++) {
     if ((arr[i] || '').length > 0) html += `<div class="turn-frozen" data-turn="${i}">${renderTurnFold(arr[i] || '', i)}</div>`;
   }
-  html += `<div class="turn-cur" data-turn="${curr}">${renderTurnBodyWithImageFallback(arr[curr] || '')}${withCursor ? '<span class="cursor"></span>' : ''}</div>`;
+  html += `<div class="turn-cur" data-turn="${curr}">${renderTurnBody(arr[curr] || '')}${withCursor ? '<span class="cursor"></span>' : ''}</div>`;
   return html;
 }
 function assistantCopyText(msg) {
@@ -2390,7 +2183,6 @@ function msgNode(msg) {
   else if (msg.role === 'assistant') {
     const segs = assistantTurnSegs(msg);
     let html = renderAssistantTurnsHtml(segs, msg.curr_turn, false);
-    if (!html && msg.askUser) html = renderAskUserNotice(msg.askUser);
     if (msg.stopped) html += `<p><em>[${escapeHtml(t('status.stopped'))}]</em></p>`;
     el.innerHTML = `<div class="bubble md">${html}</div>`;
     postRenderEnhance(el.querySelector('.bubble'));
@@ -2660,7 +2452,7 @@ function paintDraft(r, turn, visibleCurrBody) {
   const body = visibleCurrBody || '';
   const prevBody = r._draftPaintBody || '';
   if (!tryPatchInflightToolDom(cur, body, prevBody)) {
-    cur.innerHTML = renderTurnBodyWithImageFallback(body) + '<span class="cursor"></span>';
+    cur.innerHTML = renderTurnBody(body) + '<span class="cursor"></span>';
     postRenderEnhance(cur);
   } else if (!cur.querySelector('.cursor')) {
     cur.insertAdjacentHTML('beforeend', '<span class="cursor"></span>');
@@ -2919,6 +2711,7 @@ function setActiveSession(id) {
   r.draftEl = null;
   resetTypewriterState(r);
   renderAllMessages(sess);
+  scrollBottom(true);
   setBusy(sess, rt(sess).busy);
   renderSessionList();
   refreshPlanBar(null);
@@ -2934,9 +2727,8 @@ function setActiveSession(id) {
 async function closeSession(id) {
   const sess = state.sessions.get(id);
   if (sess && sess.bridgeSessionId) {
-    const headers = window.ga.bridgeToken ? { 'X-GA-Bridge-Token': window.ga.bridgeToken } : {};
     try { await window.ga.rpc('session/cancel', { sessionId: sess.bridgeSessionId }); } catch (_) {}
-    fetch(`${BRIDGE_ORIGIN}/session/${sess.bridgeSessionId}`, { method: 'DELETE', headers }).catch(() => {});
+    fetch(`${BRIDGE_ORIGIN}/session/${sess.bridgeSessionId}`, { method: 'DELETE' }).catch(() => {});
   }
   state.sessions.delete(id); state.runtime.delete(id);
   if (state.activeId === id) {
@@ -3087,7 +2879,6 @@ function normalize(m) {
   if (m.role !== 'assistant') o.content = m.content || '';
   if (typeof m.display === 'string' && m.display.length) o.display = m.display;
   if (m.stopped) o.stopped = true;
-  if (m.ask_user) o.askUser = m.ask_user;
   if (m.images) o.images = m.images;
   if (m.files) o.files = m.files;
   if (m.ts) o.ts = m.ts;
@@ -3189,7 +2980,6 @@ async function fetchSessionPoll(sess, opts = {}) {
 }
 
 function applyPollResult(sess, result) {
-  sess.pendingInput = result.pendingInput || null;
   if (result.partial) upsert(sess, result.partial, true);
   for (const msg of (result.messages || [])) upsert(sess, msg, false);
   const busy = result.status === 'running' || !!result.partial;
@@ -3246,7 +3036,6 @@ function hydrateHistoryMessages(sess, messages) {
 async function hydrateSession(sess) {
   try {
     const result = await fetchSessionPoll(sess, { after: 0, limit: 0 });
-    sess.pendingInput = result.pendingInput || null;
     hydrateHistoryMessages(sess, result.messages);
     if (result.partial) upsert(sess, result.partial, true);
     const busy = result.status === 'running' || !!result.partial;
@@ -3478,19 +3267,14 @@ async function cancelPrompt() {
 }
 
 /* ═══════════════ 输入区 / slash / 预设 ═══════════════ */
-async function submitInput({ replyText = null } = {}) {
+async function submitInput() {
   if (_submitInFlight) return;
-  let text = replyText == null ? composerText('chat') : String(replyText);
+  let text = composerText('chat');
   if (!text.trim()) return;
-  if (replyText == null && text.trim().startsWith('/')) {
-    try {
-      const handled = await handleSlash(text.trim());
-      if (handled) inputEl.innerHTML = '';
-      else inputEl.focus();
-    } catch (e) {
-      showError(e.message || String(e));
-      inputEl.focus();
-    }
+  const slashName = slashCommandName(text);
+  if (slashName) {
+    inputEl.innerHTML = '';
+    handleSlash(slashName);
     return;
   }
   if (text.length > 20000) {
@@ -3510,7 +3294,16 @@ async function submitInput({ replyText = null } = {}) {
     syncAskUserUi();
   }
 }
-// 输入框按键、发送按钮和 input/paste 监听统一在 composer 绑定里处理(chat + collab 通用)
+sendBtn.addEventListener('click', (e) => {
+  e.preventDefault();
+  const sess = activeSess();
+  if (sess && rt(sess).busy) { cancelPrompt(); return; }  // 运行中：发送键是录制键 → 纯停止
+  submitInput();
+});
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submitInput(); }
+});
+// 输入框的 input/paste 监听统一在 bindComposerUpload(ctx) 里绑(chat + collab 通用)
 function showSystem(text) {
   const sess = activeSess(); if (!sess) return;
   const m = { role: 'system', content: text };
@@ -3626,37 +3419,14 @@ function slashCommandName(text) {
   const token = trimmed.slice(1).split(/\s+/)[0];
   return SLASH_COMMANDS.has(token) ? token : '';
 }
-async function handleSlash(cmd) {
-  const name = String(cmd || '').trim().slice(1).split(/\s+/)[0];
+async function handleSlash(name) {
   switch (name) {
-    case 'help':
-      showSystem(t('slash.help'));
-      return true;
-    case 'new':
-      await newSession();
-      return true;
-    case 'clear': {
-      const s = activeSess();
-      if (s) { s.messages = []; renderAllMessages(s); }
-      return true;
-    }
-    case 'stop':
-      if (await cancelPrompt()) {
-        showSystem(t('sys.stopRequested'));
-        return true;
-      }
-      return false;
-    case 'settings':
-      openSettings();
-      return true;
-    case 'privacy':
-      // 后端命令(privacy_guard 插件在 agentmain._handle_slash_cmd 层处理),
-      // 原样转发给 bridge, 由后端返回结果消息
-      await sendPrompt(cmd);
-      return true;
-    default:
-      showSystem(t('slash.unknown') + ': /' + name);
-      return false;
+    case 'help': showSystem(t('slash.help')); break;
+    case 'new': await newSession(); break;
+    case 'clear': { const s = activeSess(); if (s) { s.messages = []; renderAllMessages(s); } break; }
+    case 'stop': if (await cancelPrompt()) showSystem(t('sys.stopRequested')); break;
+    case 'settings': openSettings(); break;
+    default: showSystem(t('slash.unknown') + ': /' + name);
   }
 }
 // 预设卡：按 data-preset 解耦（与翻译后的标题无关）
@@ -4414,7 +4184,10 @@ function removePendingFile(sid, { stripPlaceholder = false } = {}) {
   if (stripPlaceholder) removePlaceholderFromComposer(removed);
   renderThumbStrip(fileCtx(removed));
   if (removed.path) {
-    bridgeFetch('/upload', { method: 'DELETE', body: { path: removed.path } }).catch(() => {});
+    fetch(`${BRIDGE_ORIGIN}/upload`, {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: removed.path }),
+    }).catch(() => {});
   }
 }
 // #1 对账:DOM 里 chip 没了(被原子删除/退格整块删)→ 同步移除附件 + 删磁盘文件
@@ -4428,10 +4201,12 @@ function reconcilePendingFiles(ctx = activeFileComposer) {
 }
 
 async function uploadOne(name, dataUrl, sid) {
-  const j = await bridgeFetch('/upload', {
+  const res = await fetch(`${BRIDGE_ORIGIN}/upload`, {
     method: 'POST',
-    body: { name, dataUrl, sid: sid || '' },
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, dataUrl, sid: sid || '' }),
   });
+  const j = await res.json();
   if (!j.ok) throw new Error(j.error || 'upload failed');
   return j.path;
 }
@@ -4501,7 +4276,11 @@ function handleThumbStripClick(e, ctx) {
       removePlaceholderFromComposer(removed);
       renderThumbStrip(ctx);
       if (removed.path) {
-        bridgeFetch('/upload', { method: 'DELETE', body: { path: removed.path } }).catch(() => {});
+        fetch(`${BRIDGE_ORIGIN}/upload`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: removed.path }),
+        }).catch(() => {});
       }
     }
     return;
@@ -4658,8 +4437,8 @@ window.ga.onBridgeNotification((msg) => {
   if (msg && msg.type === 'session-state') {
     for (const sess of state.sessions.values()) {
       if (sess.bridgeSessionId === msg.sessionId) {
-        if (['running', 'idle', 'awaiting_input', 'error', 'cancelled'].includes(msg.status) ||
-            ['running', 'idle', 'awaiting_input', 'error', 'cancelled'].includes(msg.state)) {
+        if (['running', 'idle', 'error', 'cancelled'].includes(msg.status) ||
+            ['running', 'idle', 'error', 'cancelled'].includes(msg.state)) {
           pollSession(sess);
         }
         if (msg.state === 'idle' || msg.status === 'idle') tokPollBridge();
@@ -5179,7 +4958,7 @@ document.addEventListener('keydown', (e) => {
 });
 if (msgArea) {
   msgArea.addEventListener('click', (e) => {
-    const img = e.target.closest('.user-imgs img, .md img');
+    const img = e.target.closest('.user-imgs img');
     if (img && img.src) { openLightbox(img.src); return; }
     const fileChip = e.target.closest('.user-files .file-chip');
     if (fileChip) {
@@ -5193,47 +4972,13 @@ if (msgArea) {
 function uploadRawUrl(path, download) {
   return `${BRIDGE_ORIGIN}/upload/raw?path=${encodeURIComponent(path || '')}${download ? '&download=1' : ''}`;
 }
-function bridgeIsLocal() {
-  return location.hostname === '127.0.0.1' || location.hostname === 'localhost';
-}
 async function openUploadFile(path, name) {
-  // 远程访问：浏览器无法调起 bridge 那台/本机的系统程序，降级为下载到本机
-  if (!bridgeIsLocal()) {
-    const a = document.createElement('a');
-    a.href = uploadRawUrl(path, true);
-    a.download = name || '';
-    document.body.appendChild(a); a.click(); a.remove();
-    return;
-  }
-  // 本地：bridge 与你同机，调系统默认程序打开 / 在文件夹显示
-  const mode = isPreviewableByName(name || path) ? 'open' : 'reveal';
-  try {
-    const j = await bridgeFetch('/path/open', {
-      method: 'POST',
-      body: { kind: 'upload', path, mode },
-    });
-    if (!j.ok) throw new Error(j.error || 'open failed');
-  } catch (e) {
-    showChanToast(t('file.openFailed'), e.message || String(e), 'err');
-  }
-}
-
-const PREVIEWABLE_EXTS = new Set([
-  'pdf',
-  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'tiff',
-  'txt', 'md', 'log', 'json', 'yaml', 'yml', 'xml', 'csv', 'tsv', 'ini', 'toml', 'env', 'rtf',
-  'py', 'js', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'h', 'hpp', 'rs', 'go', 'rb', 'php', 'sh', 'bash', 'zsh', 'fish', 'lua', 'pl', 'r', 'scala', 'kt', 'swift',
-  'html', 'htm', 'css', 'scss', 'sass', 'less', 'vue', 'svelte', 'sql',
-  'doc', 'docx', 'pages', 'odt',
-  'xls', 'xlsx', 'numbers', 'ods',
-  'ppt', 'pptx', 'key', 'odp',
-  'mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a',
-  'mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv',
-]);
-function isPreviewableByName(name) {
-  const m = String(name || '').match(/\.([^./\\]+)$/);
-  if (!m) return false;
-  return PREVIEWABLE_EXTS.has(m[1].toLowerCase());
+  const a = document.createElement('a');
+  a.href = uploadRawUrl(path, true);
+  a.download = name || '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 /* ═══════════════ 后台服务页 Tab（消息通道 / 状态面板） ═══════════════ */
@@ -5934,7 +5679,7 @@ function bindComposerInRoot(root, opts) {
     else closeMenu();
   }
 
-  function doSend(meta = {}) { opts.onSend?.(meta); }
+  function doSend() { opts.onSend?.(); }
 
   plusBtn?.addEventListener('click', (e) => {
     e.preventDefault();
@@ -5959,13 +5704,13 @@ function bindComposerInRoot(root, opts) {
   input?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
-      doSend({ source: 'keyboard', event: e });
+      doSend();
     }
   });
 
   sendBtn?.addEventListener('click', (e) => {
     e.preventDefault();
-    doSend({ source: 'button', event: e });
+    doSend();
   });
 
   opts.afterBind?.(root, { input, closeMenu, doSend });
@@ -5977,9 +5722,9 @@ function bindComposerInRoot(root, opts) {
   const root = document.getElementById('chat-composer');
   const bound = bindComposerInRoot(root, {
     ctx: 'chat',
-    onSend(meta = {}) {
+    onSend() {
       const sess = activeSess();
-      if (meta.source === 'button' && sess && rt(sess).busy) { cancelPrompt(); return; }
+      if (sess && rt(sess).busy) { cancelPrompt(); return; }
       submitInput();
     },
   });
@@ -6231,7 +5976,7 @@ function bindComposerInRoot(root, opts) {
     drawerEl.innerHTML = `<div class="collab-drawer-backdrop"></div><aside class="collab-drawer"><div class="collab-drawer-head"><span class="collab-drawer-title">${esc(w.title)}</span><button class="modal-x collab-drawer-close">${GA_ICON('x')}</button></div><div class="collab-drawer-body"><div class="bubble md"></div></div></aside>`;
     const bubble = drawerEl.querySelector('.collab-drawer-body .bubble');
     if (bubble) {
-      bubble.innerHTML = renderTurnBodyWithImageFallback(w.fullReply || t('collab.summaryWait'));
+      bubble.innerHTML = renderTurnBody(w.fullReply || t('collab.summaryWait'));
       postRenderEnhance(bubble);
     }
     drawerEl.querySelector('.collab-drawer-backdrop').onclick = closeWorkerDrawer;

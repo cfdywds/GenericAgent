@@ -7,10 +7,6 @@ _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 _LOG_GLOB = os.path.join(_LOG_DIR, 'model_responses_*.txt')
 _BLOCK_RE = re.compile(r'^=== (Prompt|Response) ===.*?\n(.*?)(?=^=== (?:Prompt|Response) ===|\Z)',
                        re.DOTALL | re.MULTILINE)
-_BLOCK_TS_RE = re.compile(
-    rb'^=== (?:Prompt|Response) ===\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})',
-    re.MULTILINE,
-)
 _SUMMARY_RE = re.compile(r'<summary>\s*(.*?)\s*</summary>', re.DOTALL)
 _ROUND_HEADER_RE = re.compile(rb'^=== (Prompt|Response) ===', re.MULTILINE)
 _ROUNDS_CACHE_PATH = os.path.join(os.path.expanduser('~'), '.genericagent', 'continue_rounds_cache.json')
@@ -122,84 +118,11 @@ def _parse_native_history(pairs):
     return history
 
 
-def _copy_native_message(msg):
-    copied = dict(msg)
-    content = copied.get('content')
-    if isinstance(content, list):
-        copied['content'] = [dict(b) if isinstance(b, dict) else b for b in content]
-    return copied
-
-
-def _sanitize_native_tool_edges(history):
-    cleaned = [_copy_native_message(m) for m in history or [] if isinstance(m, dict)]
-    while True:
-        tool_use_ids, tool_result_ids = set(), set()
-        for msg in cleaned:
-            content = msg.get('content') or []
-            if not isinstance(content, list):
-                continue
-            if msg.get('role') == 'assistant':
-                tool_use_ids.update(
-                    b.get('id') for b in content
-                    if isinstance(b, dict) and b.get('type') == 'tool_use' and b.get('id')
-                )
-            elif msg.get('role') == 'user':
-                tool_result_ids.update(
-                    b.get('tool_use_id') for b in content
-                    if isinstance(b, dict) and b.get('type') == 'tool_result' and b.get('tool_use_id')
-                )
-        paired_ids = tool_use_ids & tool_result_ids
-        changed = False
-        next_cleaned = []
-        for msg in cleaned:
-            content = msg.get('content')
-            if not isinstance(content, list):
-                next_cleaned.append(msg)
-                continue
-            new_content = []
-            for block in content:
-                if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id') not in paired_ids:
-                    changed = True
-                    continue
-                if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id') not in paired_ids:
-                    changed = True
-                    continue
-                new_content.append(block)
-            if new_content:
-                new_msg = dict(msg)
-                new_msg['content'] = new_content
-                next_cleaned.append(new_msg)
-            else:
-                changed = True
-        cleaned = next_cleaned
-        if not changed:
-            return cleaned
-
-
-def _parse_native_history_tolerant(pairs):
-    history, skipped = [], 0
-    for p, r in pairs:
-        try:
-            user_msg = json.loads(p)
-            blocks = ast.literal_eval(r)
-            if not (isinstance(user_msg, dict) and user_msg.get('role') == 'user'):
-                raise ValueError('prompt is not a native user message')
-            if not isinstance(blocks, list):
-                raise ValueError('response is not a native block list')
-        except Exception:
-            skipped += 1
-            continue
-        history.append(user_msg)
-        history.append({'role': 'assistant', 'content': blocks})
-    history = _sanitize_native_tool_edges(history)
-    return (history or None), skipped
-
-
 def parse_native_log(path, allow_empty=False):
     """Parse a native `model_responses_*.txt` log into backend.history.
 
     Public wrapper around the mature `/continue` parser. It intentionally only
-    restores complete Prompt->Response pairs; dangling Prompt / partial turns keep
+    restores complete Prompt→Response pairs; dangling Prompt / partial turns keep
     the current continue semantics and are ignored. Returns:
     - list (possibly [] when allow_empty=True) on native success;
     - None when the file is unreadable / non-native / empty without allow_empty.
@@ -213,17 +136,16 @@ def parse_native_log(path, allow_empty=False):
     if not pairs:
         # Native-looking but incomplete logs (e.g. dangling Prompt without Response)
         # have block headers but no complete pairs. For worldline's allow_empty mode
-        # this means "0 completed rounds", not "parse failed -> trust live history".
+        # this means "0 completed rounds", not "parse failed → trust live history".
         if allow_empty and (_is_empty_log(path) or _BLOCK_RE.findall(content or '')):
             return []
         return None
-    history, _skipped = _parse_native_history_tolerant(pairs)
-    return history
+    return _parse_native_history(pairs)
 
 
 def _derive_hist_info(history):
-    """从 native history 重建 history_info(轮级纪要):真实用户提问 -> `[USER]: ...`;每条
-    assistant(=一轮) -> `[Agent] <summary>`(无 summary 取首行)。与 ga.turn_end_callback /
+    """从 native history 重建 history_info(轮级纪要):真实用户提问 → `[USER]: …`;每条
+    assistant(=一轮) → `[Agent] <summary>`(无 summary 取首行)。与 ga.turn_end_callback /
     worldline 树同口径。纯函数、不依赖 worldline,供续接 opt-in 恢复工作记忆(见 restore_wm)。"""
     def _all_text(m):
         c = m.get('content') if isinstance(m, dict) else None
@@ -254,6 +176,7 @@ def _derive_hist_info(history):
             out.append(f'[Agent] {s}')
     return out
 
+
 _PREVIEW_WIN = 32 * 1024
 
 # Content-grep budget for `/continue` search box: read at most this many bytes
@@ -261,44 +184,6 @@ _PREVIEW_WIN = 32 * 1024
 # user-typed prompt + first model reply + early summaries live in the first MB,
 # which is what users actually want to recall sessions by.
 _GREP_WIN = 1 * 1024 * 1024
-
-
-def _parse_block_timestamp(raw):
-    try:
-        if isinstance(raw, bytes):
-            raw = raw.decode('ascii')
-        return float(time.mktime(time.strptime(raw, '%Y-%m-%d %H:%M:%S')))
-    except Exception:
-        return 0.0
-
-
-def _latest_block_timestamp_from_file(path, size=None):
-    """Newest timestamp written in `=== Prompt/Response === <ts>` headers."""
-    try:
-        size = os.path.getsize(path) if size is None else int(size)
-        with open(path, 'rb') as fh:
-            pos = size
-            carry = b''
-            while pos > 0:
-                n = min(64 * 1024, pos)
-                pos -= n
-                fh.seek(pos)
-                chunk = fh.read(n) + carry
-                matches = list(_BLOCK_TS_RE.finditer(chunk))
-                if matches:
-                    for match in reversed(matches):
-                        ts = _parse_block_timestamp(match.group(1))
-                        if ts:
-                            return ts
-                carry = chunk[:128]
-    except (OSError, ValueError):
-        return 0.0
-    return 0.0
-
-
-def _session_activity_time(path, st):
-    logical = _latest_block_timestamp_from_file(path, getattr(st, 'st_size', None))
-    return logical or float(getattr(st, 'st_mtime', 0.0) or 0.0)
 
 
 def file_contains_all(path, terms, max_bytes=_GREP_WIN):
@@ -486,7 +371,7 @@ def list_sessions(exclude_pid=None, exclude_log=None, rewind_root=None):
     for f in files:
         try:
             st = os.stat(f)
-            mtime, sz = _session_activity_time(f, st), st.st_size
+            mtime, sz = st.st_mtime, st.st_size
         except OSError:
             continue
         if sz < 32:
@@ -581,13 +466,6 @@ def _snapshot_current_log(pid=None):
     snapshot = os.path.join(_LOG_DIR, f'model_responses_snapshot_{pid}_{stamp}_{time.time_ns() % 1_000_000_000:09d}.txt')
     with open(snapshot, 'w', encoding='utf-8', errors='replace') as fh:
         fh.write(content)
-    try:
-        import session_meta
-        meta = session_meta.get_meta(path)
-        if meta:
-            session_meta.set_meta(snapshot, **meta)
-    except Exception:
-        pass
     with open(path, 'w', encoding='utf-8', errors='replace'):
         pass
     return snapshot
@@ -628,15 +506,12 @@ def restore(agent, path):
     except Exception as e: return f'❌ 读取失败: {e}', False
     pairs = _pairs(content)
     if not pairs: return f'❌ {os.path.basename(path)} 为空或格式不符', False
-    history, skipped = _parse_native_history_tolerant(pairs)
+    history = _parse_native_history(pairs)
     name = os.path.basename(path)
     if history is not None:
         agent.abort()
         _replace_backend_history(agent, history)
-        n = len(history) // 2
-        if skipped:
-            return f'✅ 已恢复 {n} 轮可解析对话，跳过 {skipped} 轮损坏记录（{name}）\n(已写入 backend.history，可直接继续)', True
-        return f'✅ 已恢复 {n} 轮完整对话（{name}）\n(已写入 backend.history，可直接继续)', True
+        return f'✅ 已恢复 {len(pairs)} 轮完整对话（{name}）\n(已写入 backend.history，可直接继续)', True
     from chatapp_common import _restore_native_history, _restore_text_pairs
     summary = _restore_text_pairs(content) or _restore_native_history(content)
     if not summary: return f'❌ {name} 无法解析（非 native 且无摘要可提取）', False
@@ -966,11 +841,6 @@ def extract_ui_messages(path):
 
     out, assistant, round_turn = [], None, 0
     for i, (prompt, response) in enumerate(pairs):
-        try:
-            json.loads(prompt)
-            ast.literal_eval(response)
-        except Exception:
-            continue
         user = _user_text(prompt)
         seg = _format_response_segment(response, next_tr[i])
         if user:
@@ -1231,16 +1101,13 @@ def _load_history_into(agent, path, restore_wm=False):
     pairs = _pairs(content)
     if not pairs:
         return f'❌ {os.path.basename(path)} 为空或格式不符', False
-    history, skipped = _parse_native_history_tolerant(pairs)
+    history = _parse_native_history(pairs)
     name = os.path.basename(path)
     if history is not None:
         _replace_backend_history(agent, history)
         if restore_wm and hasattr(agent, 'history'):
             agent.history = _derive_hist_info(history)   # 续接恢复工作记忆(opt-in)
-        n = len(history) // 2
-        if skipped:
-            return f'✅ 已恢复 {n} 轮可解析对话，跳过 {skipped} 轮损坏记录（{name}）', True
-        return f'✅ 已恢复 {n} 轮完整对话（{name}）', True
+        return f'✅ 已恢复 {len(pairs)} 轮完整对话（{name}）', True
     from chatapp_common import _restore_native_history, _restore_text_pairs
     summary = _restore_text_pairs(content) or _restore_native_history(content)
     if not summary:

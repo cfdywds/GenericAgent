@@ -1,18 +1,11 @@
-import os, sys, re, threading, queue, time, socket, json, struct, base64, uuid, hashlib, math
+import os, sys, re, threading, queue, time, socket, json, struct, base64, uuid, hashlib, math, subprocess
 from pathlib import Path
 from urllib.parse import quote
 import requests, qrcode
 from Crypto.Cipher import AES
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_TEMP_DIR = os.path.join(_ROOT_DIR, 'temp')
-_STATE_FILE = os.path.join(_TEMP_DIR, 'wechatapp_state.json')
-_SCHED_RENDER_DIR = os.path.join(_TEMP_DIR, 'scheduler_notifications', 'rendered')
-_SCHED_TEXT_ONLY_LIMIT = int(os.environ.get('WX_SCHED_TEXT_ONLY_LIMIT', '1200'))
-_SCHED_SUMMARY_LIMIT = int(os.environ.get('WX_SCHED_SUMMARY_LIMIT', '900'))
-_SCHED_IMAGE_MAX_PAGES = int(os.environ.get('WX_SCHED_IMAGE_MAX_PAGES', '6'))
+_TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'temp')
 from agentmain import GeneraticAgent
-from llmcore import reload_mykeys
 
 # ── AuthExpired (errcode -14 from getUpdates) ──
 class AuthExpired(Exception):
@@ -44,6 +37,7 @@ class WxBotClient:
         self.token = token
         self.bot_id = None
         self._buf = ''
+        self.last_message = None
         if not self.token: self._load()
 
     def _load(self):
@@ -247,6 +241,11 @@ class WxBotClient:
     def send_video(self, to_user_id, file_path, context_token=''):
         return self._send_media(to_user_id, file_path, 2, ITEM_VIDEO, 'video_item', context_token)
 
+    def reply_text(self, text):
+        if not self.last_message: raise RuntimeError('no last message')
+        return self.send_text(self.last_message['from_user_id'], text,
+                              self.last_message.get('context_token', ''))
+
     @staticmethod
     def extract_text(msg):
         return '\n'.join(it['text_item'].get('text', '')
@@ -266,6 +265,7 @@ class WxBotClient:
                     if not self.is_user_msg(msg) or mid in seen: continue
                     seen.add(mid)
                     if len(seen) > 5000: seen = set(list(seen)[-2000:])
+                    self.last_message = msg
                     try: on_message(self, msg)
                     except Exception as e: print(f'[Bot] 回调异常: {e}')
             except KeyboardInterrupt: print('[Bot] 退出'); break
@@ -301,6 +301,49 @@ def _dl_media(items):
 
 agent = GeneraticAgent()
 agent.verbose = False
+
+_MODE, _cond_seq = 'conductor', 0
+_COND = 'http://127.0.0.1:8900/chat'
+
+def _cond_up():
+    try:
+        socket.create_connection(('127.0.0.1', 8900), .5).close(); return True
+    except OSError: return False
+
+def _start_conductor():
+    if _cond_up(): return True
+    flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP |
+             getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    kw = {'creationflags': flags} if os.name == 'nt' else {'start_new_session': True}
+    try:
+        subprocess.Popen([sys.executable, os.path.join(os.path.dirname(__file__), 'conductor.py'), '--no-browser'],
+                         cwd=os.path.dirname(__file__), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+    except OSError: return False
+    for _ in range(20):
+        time.sleep(.5)
+        if _cond_up(): return True
+    return False
+
+def _cond_forward(bot, text, seq):
+    if not _start_conductor():
+        bot.reply_text('Conductor 启动失败，请发 /switch 切回 agent。'); return
+    try:
+        mine = requests.post(_COND, json={'msg': text, 'role': 'user'}, timeout=10).json()
+    except Exception as e:
+        bot.reply_text(f'Conductor 转发失败: {e}\n请发 /switch。'); return
+    seen = {mine['id']}
+    while seq == _cond_seq:
+        time.sleep(5)
+        try: items = requests.get(_COND, params={'last': 50}, timeout=10).json()['items']
+        except Exception as e:
+            print(f'[WX] conductor poll err: {e}', file=sys.__stdout__); continue
+        for item in items:
+            if seq != _cond_seq: return
+            if item['id'] in seen or item['ts'] < mine['ts']: continue
+            seen.add(item['id'])
+            if item['role'] == 'user': return
+            if item['role'] in ('conductor', 'error') and item.get('msg'):
+                bot.reply_text(item['msg'][-3000:])
 
 _TAG_PATS = [r'<' + t + r'>.*?</' + t + r'>' for t in ('thinking', 'tool_use')]
 _TAG_PATS.append(r'<file_content>.*?</file_content>')
@@ -339,396 +382,8 @@ def _clean(t):
     t = re.sub(r'</?summary>', '', t)
     return re.sub(r'\n{3,}', '\n\n', _strip_md(t)).strip()
 
-def _load_state():
-    try:
-        with open(_STATE_FILE, encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def _save_state(**kw):
-    os.makedirs(_TEMP_DIR, exist_ok=True)
-    data = _load_state()
-    data.update({k: v for k, v in kw.items() if v is not None})
-    with open(_STATE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    return data
-
-def _remember_user(uid, ctx=''):
-    if not uid: return
-    _save_state(last_user_id=uid, last_context_token=ctx or '',
-                last_seen_at=time.strftime('%Y-%m-%d %H:%M:%S'))
-
-def _scheduler_target(cli_target=''):
-    try: cfg = reload_mykeys()[0]
-    except Exception: cfg = {}
-    state = _load_state()
-    uid = (cli_target or cfg.get('wechat_scheduler_user_id') or
-           cfg.get('wechat_push_user_id') or state.get('scheduler_user_id') or
-           state.get('last_user_id') or '')
-    ctx = cfg.get('wechat_scheduler_context_token') or state.get('scheduler_context_token') or ''
-    return str(uid).strip(), str(ctx).strip()
-
-def _send_text_chunks(bot, uid, text, context_token='', limit=3000, max_chunks=12):
-    text = (text or '').strip()
-    if not uid or not text: return 0
-    chunks = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text); break
-        cut = text.rfind('\n', 0, limit)
-        if cut < limit // 2: cut = limit
-        chunks.append(text[:cut].strip())
-        text = text[cut:].strip()
-    if len(chunks) > max_chunks:
-        chunks = chunks[:max_chunks]
-        chunks[-1] = chunks[-1].rstrip() + '\n\n[内容过长，已截断；完整报告见本地报告文件]'
-    for chunk in chunks:
-        bot.send_text(uid, chunk, context_token=context_token)
-        time.sleep(0.5)
-    return len(chunks)
-
-def _font_candidates():
-    """Prefer single-file CJK TTF first; TTC needs explicit face index."""
-    if os.name == 'nt':
-        windir = os.environ.get('WINDIR') or os.environ.get('SystemRoot') or r'C:\Windows'
-        fonts = os.path.join(windir, 'Fonts')
-        return [
-            # (path, index) — index only for TTC/OTC collections
-            (os.path.join(fonts, 'simhei.ttf'), None),
-            (os.path.join(fonts, 'msyh.ttc'), 0),
-            (os.path.join(fonts, 'msyhbd.ttc'), 0),
-            (os.path.join(fonts, 'msyhl.ttc'), 0),
-            (os.path.join(fonts, 'simsun.ttc'), 0),
-            (os.path.join(fonts, 'Deng.ttf'), None),
-            (os.path.join(fonts, 'msjh.ttc'), 0),
-        ]
-    return [
-        ('/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc', 0),
-        ('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', 0),
-        ('/usr/share/fonts/truetype/wqy/wqy-microhei.ttc', 0),
-        ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', None),
-    ]
-
-
-def _load_render_font(size=26):
-    """Load a CJK-capable font; never silently fall back to tiny default if CJK fonts exist."""
-    try:
-        from PIL import ImageFont
-    except Exception:
-        return None
-    last_err = None
-    for fp, index in _font_candidates():
-        if not fp or not os.path.isfile(fp):
-            continue
-        try:
-            if index is None:
-                return ImageFont.truetype(fp, size=size)
-            return ImageFont.truetype(fp, size=size, index=index)
-        except Exception as e:
-            last_err = e
-            continue
-    print(f'[WX Subscriber] CJK font load failed, last={last_err}', file=sys.__stdout__)
-    try:
-        from PIL import ImageFont
-        return ImageFont.load_default()
-    except Exception:
-        return None
-
-
-_EMOJI_LABELS = {
-    '📱': '[手机]', '⏱': '[运行]', '💾': '[内存]', '✅': '[OK]', '❌': '[X]',
-    '⚠️': '[!]', '⚠': '[!]', '📌': '[注]', '🟡': '[警告]', '🟢': '[正常]',
-    '🔴': '[严重]', '🔵': '[信息]', '⚡': '[负载]', '📂': '[磁盘]', '🖥️': '[主机]',
-    '🖥': '[主机]', '📊': '[状态]', '🔧': '[服务]', '🌐': '[网络]', '🔥': '[热]',
-}
-
-
-def _sanitize_for_image(text):
-    """Strip emoji / pictographs so CJK fonts never show tofu boxes as 乱码.
-
-    Prefer pure strip over label replacement: report template already has Chinese
-    status words (正常/警告/异常), so labels like [警告] would double up.
-    """
-    if not text:
-        return ''
-    s = str(text).replace('\t', '    ')
-    # drop known emoji tokens entirely (multi-char first)
-    for k in sorted(_EMOJI_LABELS.keys(), key=len, reverse=True):
-        s = s.replace(k, '')
-    out = []
-    for ch in s:
-        o = ord(ch)
-        if ch in ('\ufe0f', '\u200d', '\u20e3'):  # VS16 / ZWJ / keycap
-            continue
-        # emoji & misc symbols ranges that CJK fonts often lack
-        if (
-            0x1F000 <= o <= 0x1FAFF
-            or 0x2600 <= o <= 0x27BF
-            or 0x2300 <= o <= 0x23FF
-            or 0x2B00 <= o <= 0x2BFF
-            or 0xFE00 <= o <= 0xFE0F
-            or 0x1F900 <= o <= 0x1F9FF
-        ):
-            continue
-        out.append(ch)
-    # collapse leftover multi-spaces from emoji removal, keep newlines
-    import re as _re
-    s2 = ''.join(out)
-    s2 = _re.sub(r'[ \t]{2,}', ' ', s2)
-    s2 = _re.sub(r' *\n *', '\n', s2)
-    return s2.strip()
-
-
-def _text_width(draw, text, font):
-    try:
-        box = draw.textbbox((0, 0), text, font=font)
-        return box[2] - box[0]
-    except Exception:
-        return len(text) * 14
-
-
-def _wrap_for_image(text, draw, font, max_width):
-    wrapped = []
-    for raw in (text or '').replace('\t', '    ').splitlines():
-        line = raw.rstrip()
-        if not line:
-            wrapped.append('')
-            continue
-        cur = ''
-        for ch in line:
-            trial = cur + ch
-            if cur and _text_width(draw, trial, font) > max_width:
-                wrapped.append(cur)
-                cur = ch
-            else:
-                cur = trial
-        wrapped.append(cur)
-    return wrapped
-
-
-def _render_text_images(text, prefix='scheduled_task', max_pages=None):
-    """Render scheduler report text into one or more PNG cards (preserves newlines)."""
-    try:
-        from PIL import Image, ImageDraw
-    except Exception as e:
-        print(f'[WX Subscriber] PIL unavailable for render: {type(e).__name__}: {e}', file=sys.__stdout__)
-        return []
-
-    text = _sanitize_for_image(text)
-    os.makedirs(_SCHED_RENDER_DIR, exist_ok=True)
-    safe = re.sub(r'[^0-9A-Za-z_.-]+', '_', prefix or 'scheduled_task')[:80]
-    stamp = time.strftime('%Y%m%d_%H%M%S')
-    page_cap = _SCHED_IMAGE_MAX_PAGES if max_pages is None else max(1, int(max_pages))
-    # Compact card for short status; taller canvas for long reports
-    raw_lines = [ln.rstrip() for ln in (text or '').splitlines()]
-    short_card = sum(1 for ln in raw_lines if ln.strip()) <= 12 and len(text or '') <= 900
-    width = 900 if short_card else 1080
-    max_height = 1600 if short_card else 2200
-    margin_x, margin_y = (48, 40) if short_card else (56, 50)
-    bg, fg = (248, 249, 251), (28, 32, 36)
-    accent = (37, 99, 235)  # blue bar
-    font = _load_render_font(30 if short_card else 26)
-    title_font = _load_render_font(28 if short_card else 32)
-    if font is None:
-        print('[WX Subscriber] no font available for render', file=sys.__stdout__)
-        return []
-    probe = Image.new('RGB', (width, 200), bg)
-    draw = ImageDraw.Draw(probe)
-    max_text_width = width - margin_x * 2 - 12
-    lines = _wrap_for_image(text, draw, font, max_text_width)
-    line_h = 46 if short_card else 38
-    header_h = 36 if short_card else 18
-    lines_per_page = max(8, (max_height - margin_y * 2 - header_h) // line_h)
-    paths = []
-    total_pages = max(1, math.ceil(len(lines) / lines_per_page))
-    total_pages = min(total_pages, page_cap)
-    for page in range(total_pages):
-        page_lines = lines[page * lines_per_page:(page + 1) * lines_per_page]
-        truncated = page == total_pages - 1 and (page + 1) * lines_per_page < len(lines)
-        if truncated and len(page_lines) >= 2:
-            page_lines = page_lines[:-2] + ['', '[内容过长，图片已截断；完整报告见本地报告文件]']
-        height = min(max_height, margin_y * 2 + header_h + max(1, len(page_lines)) * line_h + 28)
-        img = Image.new('RGB', (width, height), bg)
-        d = ImageDraw.Draw(img)
-        # left accent + soft header
-        d.rectangle([0, 0, 10, height], fill=accent)
-        d.rectangle([0, 0, width, 8], fill=accent)
-        header = f'定时任务 · {page + 1}/{total_pages}' if total_pages > 1 else '定时任务'
-        d.text((margin_x, 16), header, fill=(90, 96, 104), font=title_font or font)
-        y = margin_y + header_h
-        for line in page_lines:
-            d.text((margin_x, y), line, fill=fg, font=font)
-            y += line_h
-        out = os.path.join(_SCHED_RENDER_DIR, f'{stamp}_{safe}_{page + 1}.png')
-        img.save(out, 'PNG', optimize=True)
-        paths.append(out)
-    return paths
-
-
-def _summarize_for_sched_push(tid, report_path, body):
-    text = (body or '').strip()
-    head = text[:_SCHED_SUMMARY_LIMIT].rstrip()
-    if len(text) > _SCHED_SUMMARY_LIMIT:
-        head += '\n\n[报告较长，完整内容见随后截图或本地报告文件]'
-    return f'[定时任务] {tid}\n[状态] 完成\n[报告路径] {report_path or ""}\n[推送模式] 图片卡片\n\n{head}'
-
-
-def _push_completed_smart(bot, uid, ctx, tid, report_path, body):
-    """Prefer formatted image cards so WeChat keeps layout; then text the report path."""
-    body = (body or '').strip()
-    full_msg = f'[定时任务] {tid}\n[状态] 完成\n\n{body}'
-    # Prefer image-first: plain WeChat text collapses newlines/emoji and looks unformatted.
-    image_text = f'{tid}\n\n{body}' if body else f'{tid}\n完成'
-    # Short pure-status cards still 1 page; richer cards (services list) allow up to 2.
-    short = len(body) <= 500 and body.count('\n') <= 10
-    medium = len(body) <= 1600 and body.count('\n') <= 40
-    image_paths = _render_text_images(
-        image_text, prefix=tid, max_pages=1 if short else (2 if medium else None)
-    )
-    if image_paths:
-        sent = 0
-        try:
-            for img in image_paths:
-                bot.send_image(uid, img, context_token=ctx)
-                sent += 1
-                time.sleep(0.8)
-            # After images: send path so users can open the full local report when cards truncate.
-            if report_path:
-                path_msg = f'[定时任务] {tid}\n[状态] 完成\n[报告路径] {report_path}'
-                sent += _send_text_chunks(bot, uid, path_msg, context_token=ctx, max_chunks=1)
-            return sent
-        except Exception as e:
-            print(f'[WX Subscriber] image push failed, fallback text: {type(e).__name__}: {e}', file=sys.__stdout__)
-    # Fallback pure text only if render/send image failed
-    return _send_text_chunks(bot, uid, full_msg, context_token=ctx)
-
-
-def _read_file_if_exists(path):
-    if not path or not os.path.isfile(path): return ''
-    try:
-        with open(path, encoding='utf-8', errors='replace') as f:
-            return f.read()
-    except Exception as e:
-        print(f'[WX Subscriber] read file error: {type(e).__name__}: {e}', file=sys.__stdout__)
-        return ''
-
-class WeChatTaskSubscriber:
-    """微信定时任务通知订阅者。"""
-    def __init__(self, bot):
-        self.bot = bot
-        self.event_file = os.path.join(_TEMP_DIR, 'scheduler_notifications', 'events.jsonl')
-        self.offset_file = os.path.join(_TEMP_DIR, '.wechat_subscriber_offset')
-        self.offset = 0
-        self._load_offset()
-
-    def _load_offset(self):
-        try:
-            with open(self.offset_file, encoding='utf-8') as f:
-                self.offset = int(f.read().strip() or '0')
-        except Exception:
-            self.offset = 0
-
-    def _save_offset(self):
-        os.makedirs(os.path.dirname(self.offset_file), exist_ok=True)
-        with open(self.offset_file, 'w', encoding='utf-8') as f:
-            f.write(str(self.offset))
-
-    def poll_events(self):
-        if not os.path.exists(self.event_file):
-            return []
-        events = []
-        size = os.path.getsize(self.event_file)
-        if self.offset > size:
-            self.offset = 0
-        try:
-            with open(self.event_file, encoding='utf-8') as f:
-                f.seek(self.offset)
-                new_offset = self.offset
-                while True:
-                    line = f.readline()
-                    if not line:
-                        break
-                    if not line.endswith('\n'):
-                        break
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        new_offset = f.tell()
-                        continue
-                    if self.should_handle(event):
-                        events.append(event)
-                    new_offset = f.tell()
-                self.offset = new_offset
-        except Exception as e:
-            print(f'[WX Subscriber] poll error: {type(e).__name__}: {e}', file=sys.__stdout__)
-        self._save_offset()
-        # 重连/积压时只保留每个 task 最新一条，避免把历史图卡全部补发
-        return self._collapse_latest_per_task(events)
-
-    @staticmethod
-    def _collapse_latest_per_task(events):
-        """同一 task_id 只保留队列中最后一条（最近一次），丢弃历史补发。"""
-        if len(events) <= 1:
-            return events
-        latest = {}
-        order = []
-        for ev in events:
-            tid = ev.get('task_id') or 'scheduled_task'
-            if tid not in latest:
-                order.append(tid)
-            latest[tid] = ev
-        collapsed = [latest[t] for t in order]
-        skipped = len(events) - len(collapsed)
-        if skipped > 0:
-            print(f'[WX Subscriber] backlog collapse: {len(events)} -> {len(collapsed)} '
-                  f'(skip {skipped} older events, keep latest per task)',
-                  file=sys.__stdout__)
-        return collapsed
-
-    def should_handle(self, event):
-        return event.get('event_type') in ('task_completed', 'task_failed')
-
-    def handle_event(self, event):
-        uid, ctx = _scheduler_target()
-        tid = event.get('task_id', 'scheduled_task')
-        if not uid:
-            print(f'[WX Subscriber] no push target for {tid}; send /sched_target or set wechat_scheduler_user_id',
-                  file=sys.__stdout__)
-            return
-
-        result = event.get('result') or {}
-        try:
-            if event.get('event_type') == 'task_completed':
-                report_path = result.get('report_path', '')
-                report = _read_file_if_exists(report_path)
-                body = report.strip() or f'(报告为空或不可读: {report_path})'
-                sent = _push_completed_smart(self.bot, uid, ctx, tid, report_path, body)
-            else:
-                error = (result.get('error') or '(无错误信息)').strip()
-                msg = f'[定时任务] {tid}\n[状态] 失败\n\n{_clean(error) or error}'
-                sent = _send_text_chunks(self.bot, uid, msg, context_token=ctx)
-            print(f'[WX Subscriber] pushed {tid} to {uid} parts={sent}', file=sys.__stdout__)
-        except Exception as e:
-            print(f'[WX Subscriber] push failed {tid}: {type(e).__name__}: {e}', file=sys.__stdout__)
-
-    def start(self):
-        def _loop():
-            print('[WX Subscriber] started', file=sys.__stdout__)
-            while True:
-                try:
-                    for event in self.poll_events():
-                        try:
-                            self.handle_event(event)
-                        except Exception as e:
-                            print(f'[WX Subscriber] handle error: {type(e).__name__}: {e}', file=sys.__stdout__)
-                    time.sleep(10)
-                except Exception as e:
-                    print(f'[WX Subscriber] loop error: {type(e).__name__}: {e}', file=sys.__stdout__)
-                    time.sleep(30)
-        threading.Thread(target=_loop, daemon=True).start()
-
 def on_message(bot, msg):
+    global _MODE, _cond_seq
     text = bot.extract_text(msg).strip()
     uid = msg.get('from_user_id', '')
     ctx = msg.get('context_token', '')
@@ -737,18 +392,17 @@ def on_message(bot, msg):
     if media_paths:
         text = (text + '\n' if text else '') + '\n'.join(f'[用户发送文件: {p}]' for p in media_paths)
     print(f'[WX] 收到: {text[:80]}', file=sys.__stdout__)
-    _remember_user(uid, ctx)
 
     # Commands
+    if text == '/switch':
+        _MODE = 'agent' if _MODE == 'conductor' else 'conductor'
+        _cond_seq += 1
+        bot.send_text(uid, f'模式 → {_MODE}', context_token=ctx)
+        return
     if text in ('/stop', '/abort'):
         agent.abort()
         _task_aborted[uid] = True
         print(f'[WX] /stop set _task_aborted[{uid}]', file=sys.__stdout__)
-        return
-    if text in ('/sched_target', '/scheduler_target'):
-        _save_state(scheduler_user_id=uid, scheduler_context_token=ctx or '',
-                    scheduler_target_set_at=time.strftime('%Y-%m-%d %H:%M:%S'))
-        bot.send_text(uid, '已设为定时任务推送接收人。', context_token=ctx)
         return
     if text.startswith('/llm'):
         args = text.split()
@@ -761,6 +415,11 @@ def on_message(bot, msg):
         else:
             lines = [f"{'→' if cur else '  '} [{i}] {name}" for i, name, cur in agent.list_llms()]
             bot.send_text(uid, 'LLMs:\n' + '\n'.join(lines), context_token=ctx)
+        return
+
+    if _MODE == 'conductor':
+        _cond_seq += 1
+        threading.Thread(target=_cond_forward, args=(bot, text, _cond_seq), daemon=True).start()
         return
 
     def _handle():
@@ -831,38 +490,23 @@ def on_message(bot, msg):
     threading.Thread(target=_handle, daemon=True).start()
 
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--relogin', action='store_true')
-    parser.add_argument('--llm_no', type=int)
-    parser.add_argument('--sched-target', '--scheduler-target', dest='sched_target', default='')
-    args, _unknown = parser.parse_known_args()
+    _do_relogin = '--relogin' in sys.argv
     try: _lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM); _lock.bind(('127.0.0.1', 19531))
     except OSError: print('[WeChat] Another instance running, exiting.'); sys.exit(1)
     _logf = open(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'temp', 'wechatapp.log'), 'a', encoding='utf-8', buffering=1)
     sys.stdout = sys.stderr = _logf
     print(f'[NEW] Process starting {time.strftime("%m-%d %H:%M")}')
     bot = WxBotClient()
-    _do_relogin = '--relogin' in sys.argv
-    if args.relogin or not bot.token:
+    if _do_relogin or not bot.token:
         # QR 登录在无 TTY 的容器里也可用：把二维码打到真实 stdout（docker logs
-        # 可见），而不是日志文件。PNG 仍存 ~/.wxbot/wx_qr.png 作兜底。
+        # 可见），而不是日志文件——之前在重定向后才判 isatty()，文件句柄恒 false
+        # 导致容器内必然退出，无法首次登录。PNG 仍存 ~/.wxbot/wx_qr.png 作兜底。
         sys.stdout = sys.stderr = sys.__stdout__  # restore for QR display (real stdout / container log)
         try:
             bot.login_qr()
         finally:
             sys.stdout = sys.stderr = _logf
-    if args.llm_no is not None:
-        try:
-            agent.next_llm(args.llm_no)
-            print(f'[WX] llm_no={agent.llm_no} {agent.get_llm_name()}')
-        except Exception as e:
-            print(f'[WX] set llm_no failed: {e}')
-    if args.sched_target:
-        _save_state(scheduler_user_id=args.sched_target,
-                    scheduler_target_set_at=time.strftime('%Y-%m-%d %H:%M:%S'))
     threading.Thread(target=agent.run, daemon=True).start()
-    WeChatTaskSubscriber(bot).start()
     print(f'WeChat Bot 已启动 (bot_id={bot.bot_id})', file=sys.__stdout__)
     try:
         bot.run_loop(on_message)

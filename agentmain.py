@@ -38,19 +38,6 @@ def get_system_prompt():
     prompt += get_global_memory()
     return prompt
 
-def _default_session_role_from_argv() -> str:
-    argv = " ".join(sys.argv).replace("\\", "/").lower()
-    if "reflect/goal_mode.py" in argv:
-        return "goal_child"
-    if "reflect/agent_team_worker.py" in argv:
-        return "hive_worker"
-    if "--reflect" in argv:
-        return "reflect"
-    if "--task" in argv:
-        return "task"
-    return "main"
-
-
 # SDK:
 # agent = GenericAgent(); threading.Thread(target=agent.run, daemon=True).start()
 # output1_queue = agent.put_task(prompt1)
@@ -60,19 +47,18 @@ class GenericAgent:
         os.makedirs(os.path.join(script_dir, 'temp'), exist_ok=True)
         self.lock = threading.Lock()
         self.task_dir = None
-        self.history = []; self.handler = None; 
+        self.history = []; self.handler = None; self.all_outputs = []
         self.task_queue = queue.Queue() 
-        self.is_running = False; self.stop_sig = False; self.llm_no = 0;  
+        self.is_running = False; self.stop_sig = False; self.llm_no = 0;
+        # Output queue of the task currently executing (None when idle). Lets a UI that
+        # lost its own handle (page refresh, second client) re-attach to the live task.
+        self._current_queue = None  
         self.inc_out = False; self.verbose = True
         self.peer_hint = True
         self.force_non_stream = False
         logid = f'{(time.time_ns() + random.randrange(1_000_000)) % 1_000_000:06d}'
         self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{logid}.txt')
-        try:
-            from frontends import session_meta
-            session_meta.register_from_env(self.log_path, default_role=_default_session_role_from_argv())
-        except Exception as e:
-            print(f'[WARN] session metadata init failed: {e}')
+        self.llmclient = None
         self.load_llm_sessions()
         self.extra_sys_prompts = []
         self.intervene = self.extrakeyinfo = None
@@ -80,8 +66,8 @@ class GenericAgent:
     def load_llm_sessions(self):
         mykeys, changed = reload_mykeys()
         if not changed and hasattr(self, 'llmclients'): return
-        try: oldhistory = self.llmclient.backend.history
-        except: oldhistory = None
+        try: oldhistory, oldname = self.llmclient.backend.history, self.llmclient.backend.name
+        except: oldhistory = oldname = None
         llm_sessions = []
         for k, cfg in mykeys.items():
             if not any(x in k for x in ['api', 'config', 'cookie']): continue
@@ -95,33 +81,24 @@ class GenericAgent:
                     mixin = MixinSession(llm_sessions, s['mixin_cfg'])
                     if isinstance(mixin._sessions[0], (NativeClaudeSession, NativeOAISession)): llm_sessions[i] = NativeToolClient(mixin)
                     else: llm_sessions[i] = ToolClient(mixin)
-                except Exception as e:
-                    print(f'\n\n\n[ERROR] Failed to init MixinSession with cfg {s["mixin_cfg"]}: {e}!!!\n\n')
-                    llm_sessions[i] = None
-        llm_sessions = [s for s in llm_sessions if s is not None and not isinstance(s, dict)]
+                except Exception as e: print(f'\n\n\n[ERROR] Failed to init MixinSession with cfg {s["mixin_cfg"]}: {e}!!!\n\n')
         self.llmclients = llm_sessions
-        if not self.llmclients:
-            self.llmclient = None
-            return
-        self.llm_no %= len(self.llmclients)
-        self.llmclient = self.llmclients[self.llm_no]
+        if not self.llmclients: return
+        names = [c.backend.name if not isinstance(c, dict) else f'BADMIXIN_{i}' for i, c in enumerate(self.llmclients)]
+        if oldname in names: self.llm_no = names.index(oldname)
+        self.llmclient = self.llmclients[self.llm_no%len(self.llmclients)]
         if oldhistory: self.llmclient.backend.history = oldhistory
     
     def next_llm(self, n=-1):
         self.load_llm_sessions()
-        if not self.llmclients:
-            self.llmclient = None
-            raise Exception('[ERROR] no usable LLM backend found in mykey.py or mykey.json')
+        if not self.llmclients: return
         self.llm_no = ((self.llm_no + 1) if n < 0 else n) % len(self.llmclients)
         lastc = self.llmclient
         self.llmclient = self.llmclients[self.llm_no]
-        last_history = getattr(getattr(lastc, 'backend', None), 'history', None)
-        if not hasattr(self.llmclient, 'backend'): raise Exception('[ERROR] BAD Mixin config: Check your mykey.py')
-        if last_history is not None: self.llmclient.backend.history = last_history
+        try: self.llmclient.backend.history = lastc.backend.history
+        except: raise Exception('[ERROR] BAD Mixin config: Check your mykey.py')
         self.llmclient.last_tools = ''
-        name = self.get_llm_name(model=True)
-        if 'glm' in name or 'minimax' in name or 'kimi' in name: load_tool_schema('_cn')
-        else: load_tool_schema()
+        load_tool_schema()
     def list_llms(self): 
         self.load_llm_sessions()
         return [(i, self.get_llm_name(b), i == self.llm_no) for i, b in enumerate(self.llmclients)]
@@ -129,7 +106,7 @@ class GenericAgent:
         b = self.llmclient if b is None else b
         if isinstance(b, dict): return 'BADCONFIG_MIXIN'
         if model: return b.backend.model.lower()
-        return f"{type(b.backend).__name__}/{b.backend.name}"
+        return f"{type(b.backend).__name__.replace('Session', '')}/{b.backend.name}"
     def get_ctx_multiplier(self): return getattr(self.llmclient.backend, 'maxlen_multiplier', 1.0)
 
     def abort(self):
@@ -137,6 +114,10 @@ class GenericAgent:
         print('Abort current task...')
         self.stop_sig = True
         if self.handler is not None: self.handler.code_stop_signal.append(1)
+        for sess in getattr(self.llmclient.backend, '_sessions', [self.llmclient.backend]):
+            sess.should_stop = lambda: self.stop_sig  # live read; cleared by run()'s finally
+            try: sess.active_response.close()
+            except Exception: pass
             
     def put_task(self, query, source="user", images=None):
         display_queue = queue.Queue()
@@ -167,11 +148,13 @@ class GenericAgent:
             raw_query = self._handle_slash_cmd(raw_query, display_queue)
             if raw_query is None:
                 self.task_queue.task_done(); continue
-            self.is_running = True
+            self.is_running = True; self._current_queue = display_queue
             if len(raw_query) > 2000:
                 task_file = os.path.join(script_dir, 'temp', f'user_prompt_{os.getpid()}_{time.time_ns()}.md')
                 with open(task_file, 'w', encoding='utf-8') as f: f.write(raw_query)
                 raw_query = f'Long user prompt saved to {task_file}. Read and execute.'
+            self.all_outputs.append({"input": raw_query, "outputs": []})
+            if len(self.all_outputs) > 10000: self.all_outputs = self.all_outputs[-5000:]
             rquery = smart_format(raw_query.replace('\n', ' '), max_str_len=200)
             self.history.append(f"[USER]: {rquery}")
             sys_prompt = get_system_prompt() + '\n'.join(self.extra_sys_prompts) + getattr(self.llmclient.backend, 'extra_sys_prompt', '')
@@ -191,18 +174,10 @@ class GenericAgent:
             gen = agent_runner_loop(self.llmclient, sys_prompt, raw_query, handler, TOOLS_SCHEMA, 
                                     max_turns=180, verbose=self.verbose, yield_info=True)
             try:
-                full_resp = ""; last_pos = 0; curr_turn = 0; turn_resps = []; exit_reason = {}
-                while True:
-                    try:
-                        chunk = next(gen)
-                    except StopIteration as stop:
-                        exit_reason = stop.value or {}
-                        break
+                full_resp = ""; last_pos = 0; curr_turn = 0; turn_resps = self.all_outputs[-1]["outputs"]
+                for chunk in gen:
                     if consume_file(self.task_dir, '_stop'): self.abort() 
-                    if self.stop_sig:
-                        exit_reason = {'result': 'ABORTED'}
-                        gen.close()
-                        break
+                    if self.stop_sig: break
                     if isinstance(chunk, dict) and 'turn' in chunk: 
                         curr_turn = chunk['turn']; turn_resps.append(''); continue
                     full_resp += chunk;  turn_resps[-1] += chunk
@@ -213,20 +188,14 @@ class GenericAgent:
                 if self.inc_out and last_pos < len(full_resp):
                     display_queue.put({'next': full_resp[last_pos:], 'source': source,
                                     'turn': curr_turn, 'outputs': turn_resps[-2:]})
-                display_queue.put({'done': full_resp, 'source': source, 'turn': curr_turn,
-                                   'outputs': turn_resps.copy(), 'exit_reason': exit_reason})
+                display_queue.put({'done': full_resp, 'source': source, 'turn': curr_turn, 'outputs': turn_resps.copy()})
                 self.history = handler.history_info
             except Exception as e:
-                error_text = format_error(e)
-                print(f"Backend Error: {error_text}")
-                compat_done = full_resp + f'\n```\n{error_text}\n```'
-                display_queue.put({'done': compat_done, 'transcript': full_resp,
-                                   'source': source, 'turn': curr_turn,
-                                   'outputs': turn_resps.copy(), 'error': error_text,
-                                   'exit_reason': {'result': 'ERROR'}})
+                print(f"Backend Error: {format_error(e)}")
+                display_queue.put({'done': full_resp + f'\n```\n{format_error(e)}\n```', 'source': source, 'turn': curr_turn, 'outputs': turn_resps.copy()})
             finally:
                 if self.stop_sig: print('User aborted the task.')
-                self.is_running = self.stop_sig = False
+                self.is_running = self.stop_sig = False  # keep _current_queue: its final 'done' may still be unclaimed (refreshed UI salvages it); next task overwrites it
                 self.task_queue.task_done()
                 if self.handler is not None: self.handler.code_stop_signal.append(1)
 

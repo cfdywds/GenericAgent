@@ -7,27 +7,6 @@ _registry = {}
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _safe_stderr(msg):
-    """Best-effort log; never raise (broken/closed stderr is common on Windows GUI)."""
-    try:
-        err = sys.stderr
-        if err is None:
-            return
-        text = str(msg)
-        # Avoid Windows console OSError EINVAL on unencodable chars.
-        encoding = getattr(err, "encoding", None) or "utf-8"
-        try:
-            text.encode(encoding, errors="strict")
-        except Exception:
-            text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
-        err.write(text)
-        flush = getattr(err, "flush", None)
-        if callable(flush):
-            flush()
-    except Exception:
-        pass
-
-
 def register(event):
     def decorator(fn):
         _registry.setdefault(event, []).append(fn)
@@ -42,7 +21,7 @@ def trigger(event, ctx: dict):
             if isinstance(r, dict):
                 ctx = r
         except Exception as e:
-            _safe_stderr(f"[hooks] {event} callback error: {e}\n")
+            sys.stderr.write(f"[hooks] {event} callback error: {e}\n")
     return ctx
 
 
@@ -84,5 +63,5 @@ def load(name):
         importlib.import_module(f'plugins.{name}')
         return True
     except Exception as e:
-        _safe_stderr(f"[hooks] plugin '{name}' load failed: {e}\n")
+        sys.stderr.write(f"[hooks] plugin '{name}' load failed: {e}\n")
         return False

@@ -1,18 +1,13 @@
 """Desktop Pet with Skin System — Cross-platform with True Transparency"""
 import os, re, sys, json, threading, io
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-PORT = 41983
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 SKINS_DIR = os.path.join(SCRIPT_DIR, 'skins')
-DEFAULT_SKIN = os.environ.get('GA_DESKTOP_PET_SKIN', 'ameath')
-TOAST_PET_GAP = 16
-TOAST_ANCHOR_RATIO = 0.75
-TOAST_DISPLAY_SECONDS = float(os.environ.get('GA_DESKTOP_PET_TOAST_SECONDS', '8'))
-TOAST_DISPLAY_MS = int(TOAST_DISPLAY_SECONDS * 1000)
+
+PET_LOCK_PORT = 19533               # same convention as the other frontends (QQ 19528, DingTalk 19530, Discord 19532)
+_LOCK_SOCK = None                   # kept alive for the whole process: the kernel frees the port on exit
 
 class SkinLoader:
     """Load and parse skin configuration"""
@@ -144,52 +139,26 @@ def _wrap_text_for_width(draw, text, font, max_width):
     return lines or ['']
 
 
-def _toast_geometry_top_origin(pet_x, pet_top_y, pet_width, tail_x, tail_y, gap=TOAST_PET_GAP):
-    """Return toast top-left coordinates for top-left screen coordinate systems."""
-    anchor_x = pet_x + int(pet_width * TOAST_ANCHOR_RATIO)
-    return anchor_x - tail_x, pet_top_y - tail_y - gap
-
-
-def _toast_geometry_bottom_origin(pet_x, pet_bottom_y, pet_width, pet_height, bubble_height, tail_x, tail_y, gap=TOAST_PET_GAP):
-    """Return toast bottom-left coordinates for macOS screen coordinates."""
-    anchor_x = pet_x + int(pet_width * TOAST_ANCHOR_RATIO)
-    pet_top_y = pet_bottom_y + pet_height
-    tail_from_bottom = max(0, bubble_height - 1 - tail_y)
-    return anchor_x - tail_x, pet_top_y + gap - tail_from_bottom
-
-
 def build_bubble_image(message, max_width=220):
-    """Build a PIL image for the status bubble using the user asset when available."""
-    message = _normalize_bubble_text(message or '')
-
-    bubble_path = next((p for p in [
-        os.path.join(SCRIPT_DIR, 'chat_bubble.png'),
-        os.path.join(SCRIPT_DIR, 'bubble.png'),
-    ] if os.path.exists(p)), None)
+    """Build a PIL image for the toast bubble using the user asset when available."""
+    message = (message or '').strip()
+    bubble_path = next((p for p in [os.path.join(SCRIPT_DIR, 'chat_bubble.png'),
+                                     os.path.join(SCRIPT_DIR, 'bubble.png')]
+                        if os.path.exists(p)), None)
 
     if bubble_path:
         bubble = Image.open(bubble_path).convert('RGBA')
     else:
         bubble = Image.new('RGBA', (256, 128), (255, 255, 255, 0))
         draw = ImageDraw.Draw(bubble)
-        draw.rounded_rectangle(
-            (8, 8, 247, 87),
-            radius=12,
-            fill=(255, 255, 255, 255),
-            outline=(0, 0, 0, 255),
-            width=3,
-        )
-        draw.polygon(
-            [(48, 87), (72, 87), (56, 112)],
-            fill=(255, 255, 255, 255),
-            outline=(0, 0, 0, 255),
-        )
+        draw.rounded_rectangle((8, 8, 247, 87), radius=12, fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), width=3)
+        draw.polygon([(48, 87), (72, 87), (56, 112)], fill=(255, 255, 255, 255), outline=(0, 0, 0, 255))
 
-    target_height = max(64, int(max_width * bubble.height / bubble.width))
-    bubble = ImageOps.contain(bubble, (max_width, target_height), Image.NEAREST)
+    bubble = ImageOps.contain(bubble, (max_width, max(64, int(max_width * bubble.height / bubble.width))), Image.NEAREST)
 
+    # Detect the actual opaque bubble region to position text correctly
     alpha = bubble.getchannel('A')
-    content_box = alpha.getbbox()
+    content_box = alpha.getbbox()  # (left, top, right, bottom) of opaque area
     if content_box:
         cb_left, cb_top, cb_right, cb_bottom = content_box
     else:
@@ -201,6 +170,7 @@ def build_bubble_image(message, max_width=220):
     font = _load_default_font(font_size)
     draw = ImageDraw.Draw(bubble)
 
+    # Padding relative to the opaque bubble region, not the full image
     inner_pad_x = max(6, content_w // 14)
     inner_pad_top = max(4, content_h // 12)
     inner_pad_bottom = max(12, content_h // 4)
@@ -215,9 +185,9 @@ def build_bubble_image(message, max_width=220):
         lines = lines[:max_lines]
         if lines:
             last = lines[-1]
-            while last and draw.textbbox((0, 0), last + '...', font=font)[2] > text_area_width:
+            while last and draw.textbbox((0, 0), last + '…', font=font)[2] > text_area_width:
                 last = last[:-1]
-            lines[-1] = (last + '...') if last else '...'
+            lines[-1] = (last + '…') if last else '…'
 
     total_text_height = len(lines) * line_height
     y = cb_top + inner_pad_top + max(0, (usable_h - total_text_height) // 2) - 3
@@ -236,20 +206,21 @@ def build_bubble_image(message, max_width=220):
 
     width, height = bubble.size
     alpha = bubble.getchannel('A')
-    tail_y = height - 1
+    bottom_y = height - 1
     tail_x = width // 2
-    for scan_y in range(height - 1, -1, -1):
-        xs = [x for x in range(width) if alpha.getpixel((x, scan_y)) > 0]
+    for y in range(height - 1, -1, -1):
+        xs = [x for x in range(width) if alpha.getpixel((x, y)) > 0]
         if xs:
-            tail_y = scan_y
+            bottom_y = y
             tail_x = xs[len(xs) // 2]
             break
 
     return {
         'image': bubble,
         'size': bubble.size,
-        'tail_tip': (tail_x, tail_y),
+        'tail_tip': (tail_x, bottom_y),
     }
+
 # ============================================================================
 # Shared Base Class
 # ============================================================================
@@ -268,139 +239,17 @@ class PetBase:
         """Thread-safe wrapper for show_toast."""
         self._schedule_main(lambda m=message: self.show_toast(m))
 
-    ACTION_ALIASES = {
-        'idle': 'idle',
-        'standby': 'idle',
-        'working': 'walk',
-        'running': 'walk',
-        'think': 'thinking',
-        'thinking': 'thinking',
-        'llm': 'thinking',
-        'search': 'search',
-        'web_search': 'search',
-        'browse': 'browse',
-        'browser': 'browse',
-        'web': 'browse',
-        'code': 'code',
-        'run_code': 'code',
-        'read': 'read',
-        'file_read': 'read',
-        'write': 'write',
-        'patch': 'write',
-        'file_write': 'write',
-        'file_patch': 'write',
-        'memory': 'memory',
-        'checkpoint': 'memory',
-        'ask': 'ask',
-        'question': 'ask',
-        'fix': 'fix',
-        'repair': 'fix',
-        'success': 'success',
-        'ok': 'success',
-        'done': 'done',
-        'complete': 'done',
-        'error': 'error',
-        'failed': 'error',
-        'cancelled': 'cancelled',
-        'canceled': 'cancelled',
-        'stop': 'cancelled',
-    }
+    def _connect_hub(self):
+        """Join the local hub under the fixed name 'pet': no server, no port, one bus peer."""
+        sys.path.insert(0, SCRIPT_DIR); import hub
+        hub.serve()                                  # best effort: bring the hub up if nobody listens yet
+        hub.HubClient('pet', fixed=True, sub=['turn'], on_ev=self._on_ev).start()
 
-    ACTION_FALLBACKS = {
-        'thinking': 'idle',
-        'search': 'walk',
-        'browse': 'walk',
-        'code': 'run',
-        'read': 'idle',
-        'write': 'idle',
-        'memory': 'idle',
-        'ask': 'idle',
-        'fix': 'walk',
-        'success': 'idle',
-        'error': 'idle',
-        'done': 'idle',
-        'cancelled': 'idle',
-    }
-
-    def set_action_safe(self, action, message=None):
-        """Thread-safe wrapper for semantic GA actions."""
-        self._schedule_main(lambda a=action, m=message: self.set_action(a, m))
-
-    def _state_for_action(self, action):
-        action = str(action or 'idle').strip().lower().replace('-', '_')
-        state = self.ACTION_ALIASES.get(action, action)
-        animations = getattr(self, 'animations', {})
-        if state in animations:
-            return state
-        fallback = self.ACTION_FALLBACKS.get(state, 'idle')
-        if fallback in animations:
-            return fallback
-        return next(iter(animations), 'idle')
-
-    def set_action(self, action, message=None):
-        """Apply a semantic action, then optionally show a status bubble."""
-        state = self._state_for_action(action)
-        self.set_state(state)
-        if message:
-            self.show_toast(message)
-
-    def _start_server(self):
-        """Start HTTP control server."""
-        pet = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                parsed = urlparse(self.path)
-                params = parse_qs(parsed.query)
-
-                if 'action' in params:
-                    action = params['action'][0]
-                    msg = params.get('msg', [''])[0]
-                    pet.set_action_safe(action, msg)
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'ok')
-                elif 'state' in params:
-                    state = params['state'][0]
-                    pet.set_state_safe(state)
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'ok')
-                elif 'msg' in params:
-                    msg = params['msg'][0]
-                    pet.show_toast_safe(msg)
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'ok')
-                else:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(b'?action=search&msg=hello or ?state=idle/walk/run/sprint or ?msg=hello')
-
-            def do_POST(self):
-                body = self.rfile.read(int(self.headers.get('Content-Length', 0))).decode()
-                if body:
-                    pet.show_toast_safe(body)
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'ok')
-                else:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(b'empty body')
-            def log_message(self, *a):
-                pass
-
-        try:
-            HTTPServer.allow_reuse_address = True
-            srv = HTTPServer(('127.0.0.1', PORT), Handler)
-            threading.Thread(target=srv.serve_forever, daemon=True).start()
-            print(f'✓ Server: http://127.0.0.1:{PORT}/?action=search&msg=hello')
-        except OSError as e:
-            if e.errno == 48:
-                print(f'⚠ Port {PORT} already in use')
-            else:
-                raise
+    def _on_ev(self, c):
+        """Bus push: {'state':..} drives the animation, {'msg':..} pops a toast."""
+        d = c.get('data') or {}
+        if d.get('state'): self.set_state_safe(d['state'])
+        if d.get('msg'): self.show_toast_safe(d['msg'])
 
 
 # ============================================================================
@@ -567,7 +416,7 @@ if sys.platform == 'darwin':
             self.window.makeKeyAndOrderFront_(None)
 
             # Start HTTP server
-            self._start_server()
+            self._connect_hub()
 
             print(f"✓ macOS Pet started at ({x_pos}, {y_pos})")
             print(f"  Animations: {', '.join(self.animations.keys())}")
@@ -673,15 +522,10 @@ if sys.platform == 'darwin':
             self.toast_image = NSImage.alloc().initWithData_(ns_data)
 
             pet_frame = self.window.frame()
-            toast_x, toast_y = _toast_geometry_bottom_origin(
-                pet_frame.origin.x,
-                pet_frame.origin.y,
-                self.display_width,
-                self.display_height,
-                bubble_height,
-                tail_x,
-                tail_y,
-            )
+            anchor_x = pet_frame.origin.x + self.display_width * 0.75
+            anchor_y = pet_frame.origin.y + self.display_height * 1.65
+            toast_x = anchor_x - tail_x
+            toast_y = anchor_y - tail_y
 
             self.toast_window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(toast_x, toast_y, bubble_width, bubble_height),
@@ -704,7 +548,7 @@ if sys.platform == 'darwin':
             self.toast_window.orderFrontRegardless()
 
             self.toast_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                TOAST_DISPLAY_SECONDS,
+                3.0,
                 self,
                 'hideToast:',
                 None,
@@ -788,7 +632,7 @@ else:
 
                 # Start animation
                 self._animate()
-                self._start_server()
+                self._connect_hub()
 
                 print(f"✓ {self.platform_name} Pet started at ({x_pos}, {y_pos})")
                 print(f"  Animations: {', '.join(self.animations.keys())}")
@@ -892,17 +736,14 @@ else:
 
                 pet_x = self.root.winfo_x()
                 pet_y = self.root.winfo_y()
-                toast_x, toast_y = _toast_geometry_top_origin(
-                    pet_x,
-                    pet_y,
-                    self.display_width,
-                    tail_x,
-                    tail_y,
-                )
+                anchor_x = pet_x + int(self.display_width * 0.75)
+                anchor_y = pet_y
+                toast_x = anchor_x - tail_x
+                toast_y = anchor_y - bubble_height
 
                 self.toast_window.geometry(f'{bubble_width}x{bubble_height}+{toast_x}+{toast_y}')
 
-                self.root.after(TOAST_DISPLAY_MS, self._hide_toast)
+                self.root.after(3000, self._hide_toast)
                 print(f"Toast: {message}")
 
             def _hide_toast(self):
@@ -1024,7 +865,7 @@ else:
                 self._restart_animation_timer()
 
                 self.window.show()
-                self._start_server()
+                self._connect_hub()
 
                 print(f"✓ Linux PySide6 Pet started at ({x_pos}, {y_pos})")
                 print(f"  Animations: {', '.join(self.animations.keys())}")
@@ -1109,13 +950,9 @@ else:
 
             def _compute_toast_geometry(self, bubble_width, bubble_height, tail_x, tail_y):
                 pet_pos = self.window.frameGeometry().topLeft()
-                return _toast_geometry_top_origin(
-                    pet_pos.x(),
-                    pet_pos.y(),
-                    self.display_width,
-                    tail_x,
-                    tail_y,
-                )
+                anchor_x = pet_pos.x() + int(self.display_width * 0.75)
+                anchor_y = pet_pos.y() + int(self.display_height * 0.15)
+                return anchor_x - tail_x, anchor_y - tail_y - bubble_height // 2
 
             def show_toast(self, message):
                 if self.toast_window:
@@ -1123,13 +960,11 @@ else:
                     self.toast_window = None
                     self.toast_label = None
                     self.toast_pixmap = None
-                    self.toast_tail_tip = None
 
                 bubble_info = build_bubble_image(message, max_width=max(180, min(260, self.display_width * 2)))
                 bubble_pil = bubble_info['image']
                 bubble_width, bubble_height = bubble_info['size']
                 tail_x, tail_y = bubble_info['tail_tip']
-                self.toast_tail_tip = (tail_x, tail_y)
                 self.toast_pixmap = self._pil_to_qpixmap(bubble_pil)
 
                 self.toast_window = QWidget()
@@ -1153,7 +988,7 @@ else:
                 self.toast_window.move(toast_x, toast_y)
                 self.toast_window.show()
 
-                QTimer.singleShot(TOAST_DISPLAY_MS, self._hide_toast)
+                QTimer.singleShot(3000, self._hide_toast)
                 print(f"Toast: {message}")
 
             def _reposition_toast(self):
@@ -1167,7 +1002,8 @@ else:
                 toast_x, toast_y = self._compute_toast_geometry(
                     bubble_width,
                     bubble_height,
-                    *getattr(self, 'toast_tail_tip', (bubble_width // 2, bubble_height - 1))
+                    bubble_width // 2,
+                    bubble_height
                 )
                 self.toast_window.move(toast_x, toast_y)
 
@@ -1177,7 +1013,6 @@ else:
                     self.toast_window = None
                     self.toast_label = None
                     self.toast_pixmap = None
-                    self.toast_tail_tip = None
 
             def _schedule_main(self, fn):
                 QTimer.singleShot(0, fn)
@@ -1193,23 +1028,18 @@ else:
                 self.app.exec()
 
 if __name__ == '__main__':
-    # Singleton: if port already in use, another instance is running
     import socket
-    _s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _LOCK_SOCK = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        _s.connect(('127.0.0.1', PORT))
-        _s.close()
-        print(f'⚠ Pet already running on port {PORT}, exiting.')
+        _LOCK_SOCK.bind(("127.0.0.1", PET_LOCK_PORT))   # first one wins; a later launch just exits
+    except OSError:
         sys.exit(0)
-    except ConnectionRefusedError:
-        pass
-
     if sys.platform == 'darwin':
-        pet = MacPet(DEFAULT_SKIN)
+        pet = MacPet('vita')
         pet.run()
     elif sys.platform.startswith('win'):
-        pet = WinPet(DEFAULT_SKIN)
+        pet = WinPet('vita')
     else:
-        pet = LinuxPet(DEFAULT_SKIN)
+        pet = LinuxPet('vita')
         pet.run()
 

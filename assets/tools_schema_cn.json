@@ -7,7 +7,7 @@
       "type": {"type": "string", "enum": ["python", "powershell"], "description": "代码类型", "default": "python"},
       "timeout": {"type": "integer", "description": "执行超时时间（秒）", "default": 60},
       "cwd": {"type": "string", "description": "工作目录，默认为当前工作目录"},
-      "inline_eval": {"type": "boolean", "description": "出于进程安全已禁用，不要使用"}}}
+      "inline_eval": {"type": "boolean", "description": "不允许使用除非明确要求"}}}
   }},
   {"type": "function", "function": {
     "name": "file_read",
@@ -33,12 +33,6 @@
       "path": {"type": "string", "description": "文件路径"},
       "content": {"type": "string"},
       "mode": {"type": "string", "enum": ["overwrite", "append", "prepend"], "description": "写入模式覆盖、追加或在开头追加", "default": "overwrite"}}}
-  }},
-  {"type": "function", "function": {
-    "name": "restore_quarantine",
-    "description": "恢复被安全策略移动到 temp/quarantine 的文件。使用隔离删除结果返回的 quarantine_id。",
-    "parameters": {"type": "object", "properties": {
-      "quarantine_id": {"type": "string", "description": "safe delete 返回的隔离区 ID"}}, "required": ["quarantine_id"], "additionalProperties": false}
   }},
   {"type": "function", "function": {
     "name": "web_scan",
@@ -69,19 +63,11 @@
     "description": "当需要用户决策、提供额外信息或遇到无法自动解决的阻碍时，调用此工具中断任务并提问。多题时应一次调用",
     "parameters": {"type": "object", "properties": {
       "question": {"type": "string", "description": "多题时每题*独占*一行（带选项）"},
-      "candidates": {"type": "array", "items": {"type": "string"}, "description": "仅限单一、无歧义问题。单一确认或操作决策时必须提供能明确表达结果的候选项（例如“按方案修复”“暂不修复”）；多题或开放式回答时留空。"}}}
+      "candidates": {"type": "array", "items": {"type": "string"}, "description": "仅单题时可用。多题时留空"}}}
   }},
   {"type": "function", "function": {
     "name": "start_long_term_update",
     "description": "准备开始提炼记忆。发现值得长期记忆的信息（环境事实/用户偏好/避坑经验）时调用此工具。已记忆更新或在自主流程内时无需调用。超15轮完成的任务必须调用以沉淀经验",
     "parameters": {"type": "object", "properties": {}}}
-  },
-  {"type": "function", "function": {
-    "name": "web_search",
-    "description": "搜索互联网。优先使用 Grok live search / grok2api（快速，返回带来源的结构化结果），失败时降级到浏览器 Google。适合事实查询、实时信息和当前事件。",
-    "parameters": {"type": "object", "properties": {
-      "query": {"type": "string", "description": "自然语言搜索查询"},
-      "max_results": {"type": "integer", "description": "最多返回的来源结果数量", "default": 5}
-    }, "required": ["query"]}}
   }
 ]

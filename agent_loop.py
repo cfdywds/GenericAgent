@@ -67,9 +67,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
         _hook('llm_after', locals())
 
         if not response.tool_calls: tool_calls = [{'tool_name': 'no_tool', 'args': {}}]
-        else:
-            handler._empty_ct = 0
-            tool_calls = [{'tool_name': tc.function.name, 'args': json.loads(tc.function.arguments), 'id': tc.id}
+        else: tool_calls = [{'tool_name': tc.function.name, 'args': json.loads(tc.function.arguments), 'id': tc.id}
                           for tc in response.tool_calls]
        
         tool_results = []; next_prompts = set(); exit_reason = {}
@@ -83,9 +81,8 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema,
             gen = handler.dispatch(tool_name, args, response, index=ii, tool_num=len(tool_calls))
             try:
                 v = next(gen)
-                def proxy(): yield v; return (yield from gen)
-                if verbose: yield '`````\n'
-                outcome = (yield from proxy()) if verbose else exhaust(proxy())
+                if verbose: yield '`````\n' + v
+                outcome = (yield from gen) if verbose else exhaust(gen)
                 if verbose: yield '`````\n'
             except StopIteration as e: outcome = e.value
             

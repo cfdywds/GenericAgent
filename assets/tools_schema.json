@@ -7,7 +7,7 @@
       "type": {"type": "string", "enum": ["python", "powershell"], "description": "Code type", "default": "python"},
       "timeout": {"type": "integer", "description": "in seconds", "default": 60},
       "cwd": {"type": "string", "description": "Working directory, defaults to cwd"},
-      "inline_eval": {"type": "boolean", "description": "Disabled for process safety. Do not use."}}}
+      "inline_eval": {"type": "boolean", "description": "DO NOT USE except explicitly specified."}}}
   }},
   {"type": "function", "function": {
     "name": "file_read",
@@ -35,12 +35,6 @@
       "mode": {"type": "string", "enum": ["overwrite", "append", "prepend"], "description": "Write mode", "default": "overwrite"}}}
   }},
   {"type": "function", "function": {
-    "name": "restore_quarantine",
-    "description": "Restore a file moved to temp/quarantine by the safety policy. Use the quarantine_id returned by a quarantined delete.",
-    "parameters": {"type": "object", "properties": {
-      "quarantine_id": {"type": "string", "description": "Quarantine id returned by safe delete"}}, "required": ["quarantine_id"], "additionalProperties": false}
-  }},
-  {"type": "function", "function": {
     "name": "web_scan",
     "description": "Get simplified HTML and tab list. Removes hidden/floating/covered elements. Call after switching pages",
     "parameters": {"type": "object", "properties": {
@@ -59,40 +53,20 @@
   }},
   {"type": "function", "function": {
     "name": "update_working_checkpoint",
-    "description": "Short-term working notepad, auto-injected each turn to prevent info loss in long tasks. Call during early/mid stages, not at end. When: (1) after reading SOP, store user needs & key constraints (skip for simple 1-2 step tasks); (2) before subtask switch or context flush; (3) after repeated failures, re-read SOP and must store new findings; (4) on new task, update content, clear old progress but keep valid constraints.\n\nDon't call: simple tasks (1-2 steps), task completed (use long-term memory tool)",
+    "description": "Short-term working notepad (auto-injected each turn). Call early/mid task only when there is non-obvious state worth keeping. When: (1) after reading SOP — store needs & constraints (skip tasks <5 steps); (2) before subtask switch / context flush; (3) after repeated failures — re-read SOP and store new findings; (4) on new task — replace notepad, drop old progress, keep still-valid constraints.\n\nDon't call: tasks <5 steps, greetings, or when the task is done (use start_long_term_update instead).",
     "parameters": {"type": "object", "properties": {
-      "key_info": {"type": "string", "description": "Replaces current notepad (<200 tokens). Incremental update: review existing, keep valid, add/remove/modify. Store: pitfalls, user requirements, key params/findings, file paths, progress, next steps. Don't store: ephemeral info, obvious context, old task info when user switched tasks. Prefer over-updating over losing key info"},
-      "related_sop": {"type": "string", "description": "Related SOP names, tips for further re-read"}}}
+      "key_info": {"type": "string", "description": "Replaces current notepad (<200 tokens). Incremental update: review existing, keep valid, add/remove/modify. Store: pitfalls, user requirements, key params/findings, file paths, progress, next steps. Don't store: ephemeral info, obvious context, old task info when user switched tasks. Prefer over-updating over losing key info"}}}
   }},
   {"type": "function", "function": {
     "name": "ask_user",
     "description": "Interrupt task to ask user when needing decisions, extra info, or facing unresolvable blockers. Multiple questions should in one call",
     "parameters": {"type": "object", "properties": {
       "question": {"type": "string", "description": "For multiple questions, one per line (contain candidates)"},
-      "candidates": {"type": "array", "items": {"type": "string"}, "description": "Optional quick-select choices for a single, unambiguous question only. For a single confirmation or action decision, always supply concrete candidates that state the outcome (for example, 'Apply the fix' and 'Do not apply'). Leave empty for multi-questions or open-ended input."}}}
+      "candidates": {"type": "array", "items": {"type": "string"}, "description": "Optional quick-select choices for a single question only. Leave empty for multi-questions"}}}
   }},
   {"type": "function", "function": {
     "name": "start_long_term_update",
-    "description": "Start distilling long-term memory. Call when discovering info worth remembering (env facts/user prefs/lessons learned). Skip if memory already updated or in autonomous flow. Must call when a task that took 15+ turns is completed",
+    "description": "After a long task completes, distill long-term memory. Call when discovering info worth remembering (env facts/user prefs/lessons learned). Skip if memory already updated or in autonomous flow. Must call when a task that took 15+ turns is completed.",
     "parameters": {"type": "object", "properties": {}}}
-  },
-  {"type": "function", "function": {
-    "name": "web_search",
-    "description": "Search the web. Primary: Grok live search (fast, returns structured results with sources). Fallback: browser→Google (original channel). Use for factual queries, current events, real-time info.",
-    "parameters": {"type": "object", "properties": {
-      "query": {"type": "string", "description": "Search query in natural language"},
-      "max_results": {"type": "integer", "description": "Max number of source results to return", "default": 5}
-    }, "required": ["query"]}}
-  },
-  {"type": "function", "function": {
-    "name": "image_generation",
-    "description": "Generate images through grok2api/OpenAI-compatible /images/generations endpoint. Returns image URLs or b64_json count. Use for creating images from text prompts.",
-    "parameters": {"type": "object", "properties": {
-      "prompt": {"type": "string", "description": "Image prompt/description"},
-      "model": {"type": "string", "description": "Image model, e.g. grok-imagine-image-lite or grok-imagine-image", "default": "grok-imagine-image-lite"},
-      "n": {"type": "integer", "description": "Number of images", "default": 1},
-      "size": {"type": "string", "description": "Optional size if supported by endpoint, e.g. 1024x1024"},
-      "extra": {"type": "object", "description": "Optional extra JSON fields passed to image API"}
-    }, "required": ["prompt"]}}
   }
 ]

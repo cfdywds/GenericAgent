@@ -71,27 +71,6 @@ native_oai_config = {
 # proxy = 'http://127.0.0.1:7890'
 
 
-# ── 5. web_search grok2api endpoint (optional) ──────────────────────────────
-#  The web_search tool tries this OpenAI-compatible grok2api search endpoint
-#  first, then falls back to browser Google if it fails. Environment variables
-#  also work: GROK2API_APIBASE / GROK2API_API_KEY / GROK2API_MODEL.
-# grok2api_search_config = {
-#     'apikey': 'sk-<your-grok2api-key>',
-#     'apibase': 'https://<your-grok2api-host>/v1',
-#     'model': 'grok-4.20-0309-non-reasoning',
-# }
-#
-#  The image_generation tool uses this image endpoint first. Environment
-#  variables also work: GROK2API_IMAGE_APIBASE / GROK2API_IMAGE_API_KEY /
-#  GROK2API_IMAGE_MODEL. If IMAGE_* variables are missing, it falls back to
-#  GROK2API_APIBASE / GROK2API_API_KEY.
-# grok2api_image_config = {
-#     'apikey': 'sk-<your-grok2api-key>',
-#     'apibase': 'https://<your-grok2api-host>/v1',
-#     'model': 'grok-imagine-image-lite',
-# }
-
-
-# ── 6. Chat platform integrations (optional) ─────────────────────────────────
+# ── 5. Chat platform integrations (optional) ─────────────────────────────────
 # tg_bot_token = '...'
 # tg_allowed_users = [123456789]

@@ -287,28 +287,6 @@ mixin_config = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  网络搜索工具 grok2api（可选）
-# ══════════════════════════════════════════════════════════════════════════════
-#  web_search 工具优先使用这里的 grok2api/OpenAI 兼容搜索端点；未配置时会使用
-#  内置默认端点，失败后再降级到浏览器 Google。也可用环境变量覆盖：
-#  GROK2API_APIBASE / GROK2API_API_KEY / GROK2API_MODEL。
-# grok2api_search_config = {
-#     'apikey': 'sk-<your-grok2api-key>',
-#     'apibase': 'https://<your-grok2api-host>/v1',
-#     'model': 'grok-4.20-0309-non-reasoning',
-# }
-#
-#  image_generation 工具优先使用这里的图片端点；也可用环境变量覆盖：
-#  GROK2API_IMAGE_APIBASE / GROK2API_IMAGE_API_KEY / GROK2API_IMAGE_MODEL。
-#  若未设置 IMAGE_*，会回退到 GROK2API_APIBASE / GROK2API_API_KEY。
-# grok2api_image_config = {
-#     'apikey': 'sk-<your-grok2api-key>',
-#     'apibase': 'https://<your-grok2api-host>/v1',
-#     'model': 'grok-imagine-image-lite',
-# }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  聊天平台集成（可选；未填写的平台不会启动对应 adapter）
 # ══════════════════════════════════════════════════════════════════════════════
 # tg_bot_token = '84102K2gYZ...'
@@ -319,7 +297,6 @@ mixin_config = {
 # fs_app_id = 'cli_xxxxxxxxxxxxxxxx'
 # fs_app_secret = 'xxxxxxxxxxxxxxxx'
 # fs_allowed_users = ['ou_xxxxxxxxxxxxxxxx']        # 留空或 ['*'] 表示允许所有飞书用户
-# wechat_scheduler_user_id = 'your_wechat_user_id'  # 可选：微信定时任务主动推送目标；也可在微信里发送 /sched_target 设置
 # wecom_bot_id = 'your_bot_id'
 # wecom_secret = 'your_bot_secret'
 # wecom_allowed_users = ['your_user_id']            # 留空或 ['*'] 表示允许所有企业微信用户

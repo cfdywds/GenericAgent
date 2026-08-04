@@ -209,40 +209,6 @@ GenericAgent also supports IM frontends such as Telegram, Discord, and Lark.
 > WeChat, QQ, WeCom and DingTalk are also supported — see the Chinese section below.
 > For detailed setup, ask GenericAgent itself.
 
-#### WeChat Scheduled Task Push
-
-Scheduled tasks run as an independent reflect process. The WeChat bot only subscribes to scheduler events and pushes completed/failed reports.
-
-```bash
-# Start Streamlit UI, WeChat bot, and scheduler together
-python launch.pyw --wechat --sched --llm_no 4
-
-# If WeChat bot is already running, start only the scheduler
-python agentmain.py --reflect reflect/scheduler.py --llm_no 4
-
-# Run without the desktop UI: start both processes separately
-python frontends/wechatapp.py --llm_no 4
-python agentmain.py --reflect reflect/scheduler.py --llm_no 4
-```
-
-`--llm_no N` selects the N-th configured LLM backend with zero-based indexing. Omit it to use `0`. Send `/sched_target` to the WeChat bot once, or set `wechat_scheduler_user_id` in `mykey.py`, to choose the push recipient.
-
-### Common Chat Commands
-
-| Command | Description |
-| :--- | :--- |
-| `/new` | Start a fresh conversation and clear the current context |
-| `/continue` | List recoverable conversation snapshots |
-| `/continue N` | Restore the `N`-th recoverable conversation |
-| `/autorun [seed]` | Enter autonomous exploration mode ([SOP](memory/autonomous_operation_sop.md)) |
-| `/goal [objective]` | Start goal mode with time budget ([SOP](memory/goal_mode_sop.md)) |
-| `/hive [target]` | Start hive multi-worker collaboration ([SOP](memory/hive_sop.md)) |
-| `/conductor [task]` | Orchestrate multiple subagents via [conductor.py](frontends/conductor.py) |
-| `/scheduler` | Start / stop reflect tasks (cron via [scheduler.py](reflect/scheduler.py)) |
-| `/resume` | List recent sessions and restore one |
-| `/update` | Git pull and report impact |
-| `/morphling [target]` | Distill / absorb an external project into this repo |
-
 ---
 
 ## 🔓 Unlocking Advanced Capabilities
@@ -641,40 +607,6 @@ GenericAgent 支持 Telegram、Discord、微信、QQ、飞书 / Lark、企业微
 | 钉钉 | `python frontends/dingtalkapp.py` |
 
 > 详细配置直接问 GenericAgent。
-
-#### 微信定时任务推送
-
-定时任务现在独立于微信 Bot 运行：scheduler 负责执行 `sche_tasks/*.json` 并发布事件，微信 Bot 只订阅事件并推送完成 / 失败报告。
-
-```powershell
-# 同时启动桌面端、微信 Bot、定时任务
-python "launch.pyw" --wechat --sched --llm_no 4
-
-# 如果微信 Bot 已经在运行，只单独启动定时任务
-python "agentmain.py" --reflect "reflect/scheduler.py" --llm_no 4
-
-# 不启动桌面端，两个后台进程分开运行
-python "frontends/wechatapp.py" --llm_no 4
-python "agentmain.py" --reflect "reflect/scheduler.py" --llm_no 4
-```
-
-`--llm_no N` 表示选择第 `N + 1` 个可用 LLM 配置，编号从 `0` 开始；例如 `--llm_no 4` 是第 5 个模型配置。不传时默认使用 `0`。首次推送前，在微信里给 Bot 发送 `/sched_target`，或在 `mykey.py` 中配置 `wechat_scheduler_user_id`。
-
-### 通用聊天命令
-
-| 命令 | 说明 |
-| :--- | :--- |
-| `/new` | 开启新对话并清空当前上下文 |
-| `/continue` | 列出可恢复会话快照 |
-| `/continue N` | 恢复第 `N` 个可恢复会话 |
-| `/autorun [seed]` | 进入自主探索模式（[SOP](memory/autonomous_operation_sop.md)） |
-| `/goal [objective]` | 进入目标模式，带时间预算（[SOP](memory/goal_mode_sop.md)） |
-| `/hive [target]` | 进入 Hive 多 worker 协作模式（[SOP](memory/hive_sop.md)） |
-| `/conductor [task]` | 通过 [conductor.py](frontends/conductor.py) 编排多个 subagent |
-| `/scheduler` | 启动 / 停止 reflect 任务（cron 由 [scheduler.py](reflect/scheduler.py) 驱动） |
-| `/resume` | 列出并恢复最近会话 |
-| `/update` | Git pull 更新仓库并报告影响面 |
-| `/morphling [target]` | 蒸馏 / 吞噬外部项目到本仓库 |
 
 ---
 

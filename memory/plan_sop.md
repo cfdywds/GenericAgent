@@ -209,7 +209,7 @@ file_read(plan.md) 全文扫描，确认所有步骤（含[VERIFY]）均为 `[�
 
 ### 步骤9：启动验证subagent
 
-按 subagent.md 标准流程启动验证subagent（**task 目录=`temp/{verify_task_name}`，禁写 `temp/tasks/`**），input要点：
+按 subagent.md 标准流程启动验证subagent，input要点：
 
 - **角色**：你是独立验证者，工作是对抗性验证（证明交付物不能用）
 - **第一步强制**：file_read deliverable_audit_sop.md 完整阅读验证SOP
