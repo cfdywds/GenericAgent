@@ -52,13 +52,17 @@ class GenericAgent:
         self.is_running = False; self.stop_sig = False; self.llm_no = 0;
         # Output queue of the task currently executing (None when idle). Lets a UI that
         # lost its own handle (page refresh, second client) re-attach to the live task.
-        self._current_queue = None  
+        self._current_queue = None
         self.inc_out = False; self.verbose = True
         self.peer_hint = True
         self.force_non_stream = False
         logid = f'{(time.time_ns() + random.randrange(1_000_000)) % 1_000_000:06d}'
         self.log_path = os.path.join(script_dir, f'temp/model_responses/model_responses_{logid}.txt')
-        self.llmclient = None
+        try:
+            from frontends import session_meta
+            session_meta.register_from_env(self.log_path, default_role=_default_session_role_from_argv())
+        except Exception as e:
+            print(f'[WARN] session metadata init failed: {e}')
         self.load_llm_sessions()
         self.extra_sys_prompts = []
         self.intervene = self.extrakeyinfo = None
@@ -83,15 +87,18 @@ class GenericAgent:
                     else: llm_sessions[i] = ToolClient(mixin)
                 except Exception as e: print(f'\n\n\n[ERROR] Failed to init MixinSession with cfg {s["mixin_cfg"]}: {e}!!!\n\n')
         self.llmclients = llm_sessions
-        if not self.llmclients: return
-        names = [c.backend.name if not isinstance(c, dict) else f'BADMIXIN_{i}' for i, c in enumerate(self.llmclients)]
-        if oldname in names: self.llm_no = names.index(oldname)
-        self.llmclient = self.llmclients[self.llm_no%len(self.llmclients)]
+        if not self.llmclients:
+            self.llmclient = None
+            return
+        self.llm_no %= len(self.llmclients)
+        self.llmclient = self.llmclients[self.llm_no]
         if oldhistory: self.llmclient.backend.history = oldhistory
     
     def next_llm(self, n=-1):
         self.load_llm_sessions()
-        if not self.llmclients: return
+        if not self.llmclients:
+            self.llmclient = None
+            raise Exception('[ERROR] no usable LLM backend found in mykey.py or mykey.json')
         self.llm_no = ((self.llm_no + 1) if n < 0 else n) % len(self.llmclients)
         lastc = self.llmclient
         self.llmclient = self.llmclients[self.llm_no]
@@ -118,7 +125,7 @@ class GenericAgent:
             sess.should_stop = lambda: self.stop_sig  # live read; cleared by run()'s finally
             try: sess.active_response.close()
             except Exception: pass
-            
+
     def put_task(self, query, source="user", images=None):
         display_queue = queue.Queue()
         self.task_queue.put({"query": query, "source": source, "images": images or [], "output": display_queue})
