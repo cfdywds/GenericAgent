@@ -1076,6 +1076,9 @@ async def handle_command(update, ctx):
         return await _reply_command_text(update.message, answer)
     if op == '/review':
         return await _handle_review_command(update, ctx, cmd)
+    if op == '/role':
+        from plugins.role_profiles import handle_role_command
+        return await _reply_command_text(update.message, handle_role_command(agent, cmd))
     if op == '/new':
         _cancel_stream_task(ctx)
         return await update.message.reply_text(reset_conversation(agent))

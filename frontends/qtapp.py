@@ -2065,6 +2065,9 @@ class ChatPanel(QWidget):
         elif op == "/new":
             self._do_clear()
             self._add_system_notice("✅ 已开启新对话")
+        elif op == "/role":
+            from plugins.role_profiles import handle_role_command
+            self._add_system_notice(handle_role_command(self.agent, cmd))
         else:
             self._add_system_notice(f"未知命令: {cmd}\n{HELP_TEXT}")
 

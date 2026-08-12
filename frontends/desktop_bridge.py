@@ -86,6 +86,11 @@ def find_default_ga_root() -> Path:
 DEFAULT_GA_ROOT = find_default_ga_root()
 
 _FINAL_INFO_RE = re.compile(r'\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$')
+_ROLE_PROFILE_NAME_RE = re.compile(r'^[^<>:"/\\|?*\x00-\x1f]{1,64}$')
+_BUILTIN_ROLE_NAMES = frozenset(("analyst", "engineer", "reviewer", "writer"))
+
+class RoleProfileBusyError(RuntimeError):
+    pass
 
 
 def strip_final_info_marker(text: Any) -> str:
@@ -143,6 +148,9 @@ class Session:
     # 该会话绑定的模型下标(mykey.py 配置块顺序,== agent.llmclients 下标)。
     # None = 未绑定,发消息时回退到全局默认 ui.llmNo,保持旧会话平滑迁移。
     llm_no: Optional[int] = None
+    # Current session-only role profile. The prompt itself is attached only to
+    # the live agent and is reloaded from assets/roles when the session revives.
+    role_name: Optional[str] = None
 
 
 def _load_plan_baseline(item: dict, msgs: list) -> int:
@@ -194,6 +202,7 @@ class AgentManager:
                 "plan_scan_baseline": s.plan_scan_baseline,
                 "plan_path": s.plan_path or "",
                 "llm_no": s.llm_no,
+                "role_name": s.role_name,
                 "llm_history": llm_hist}
 
     def _session_file(self, sid: str) -> Path:
@@ -241,7 +250,8 @@ class AgentManager:
                        plan_path=_sanitize_desktop_plan_path(item["id"], item.get("plan_path") or ""),
                        status="idle", agent=None,
                        llm_history=item.get("llm_history"),
-                       llm_no=item.get("llm_no"))
+                       llm_no=item.get("llm_no"),
+                       role_name=item.get("role_name"))
 
     def _load_sessions(self):
         # New format: one file per session under temp/desktop_sessions/.
@@ -528,11 +538,175 @@ class AgentManager:
             agent = GA()
             agent.inc_out = True
             agent.verbose = True
+            if sess.role_name:
+                from plugins import role_profiles
+                with contextlib.suppress(FileNotFoundError, ValueError):
+                    profile = self.get_role_profile(sess.role_name)
+                    role_profiles.attach_profile(agent, profile["name"], profile["content"])
             threading.Thread(target=agent.run, daemon=True, name=f"GA-{sess.id}").start()
             return agent
         finally:
             with contextlib.suppress(Exception):
                 os.chdir(old_cwd)
+
+    def _role_profiles_dir(self) -> Path:
+        directory = (Path(self.ga_root) / "assets" / "roles")
+        root = Path(self.ga_root).resolve()
+        resolved = directory.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ValueError("role profile directory is outside the GenericAgent root")
+        return resolved
+
+    @staticmethod
+    def _valid_role_profile_name(name: Any) -> Optional[str]:
+        value = str(name or "").strip()
+        return value if _ROLE_PROFILE_NAME_RE.fullmatch(value) else None
+
+    def _role_profile_paths(self) -> Dict[str, Path]:
+        directory = self._role_profiles_dir()
+        if not directory.is_dir():
+            return {}
+        profiles: Dict[str, Path] = {}
+        for path in directory.iterdir():
+            if not path.is_file() or path.suffix.lower() != ".md":
+                continue
+            try:
+                path.resolve().relative_to(directory)
+            except ValueError:
+                continue
+            profiles[path.stem.casefold()] = path
+        return profiles
+
+    def list_role_profiles(self) -> List[dict]:
+        profiles = self._role_profile_paths()
+        return [{"name": path.stem, "builtin": path.stem.casefold() in _BUILTIN_ROLE_NAMES}
+                for path in sorted(profiles.values(), key=lambda item: item.name.casefold())]
+
+    def get_role_profile(self, name: Any) -> dict:
+        requested = self._valid_role_profile_name(name)
+        if requested is None:
+            raise ValueError("invalid role name")
+        path = self._role_profile_paths().get(requested.casefold())
+        if path is None:
+            raise FileNotFoundError("role profile not found")
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"cannot read role profile: {exc}") from exc
+        return {"name": path.stem, "content": content,
+                "builtin": path.stem.casefold() in _BUILTIN_ROLE_NAMES}
+
+    def save_role_profile(self, name: Any, content: Any, *, create: bool) -> dict:
+        requested = self._valid_role_profile_name(name)
+        if requested is None:
+            raise ValueError("role name contains invalid filename characters or exceeds 64 characters")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("role prompt cannot be empty")
+        if len(content.encode("utf-8")) > 64 * 1024:
+            raise ValueError("role prompt is too large")
+        directory = self._role_profiles_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        paths = self._role_profile_paths()
+        existing = paths.get(requested.casefold())
+        if create and existing is not None:
+            raise FileExistsError("role profile already exists")
+        if not create and existing is None:
+            raise FileNotFoundError("role profile not found")
+        target = existing or (directory / f"{requested}.md")
+        try:
+            target.resolve().parent.relative_to(directory)
+        except ValueError:
+            raise ValueError("role profile path is outside the roles directory")
+        with self.lock:
+            affected = [sess for sess in self.sessions.values()
+                        if (sess.role_name or "").casefold() == target.stem.casefold()]
+            if any(sess.status == "running" for sess in affected):
+                raise RoleProfileBusyError("role profile is in use by a running session")
+            tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                tmp.write_text(content, encoding="utf-8")
+                os.replace(tmp, target)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    tmp.unlink()
+            for sess in affected:
+                if sess.agent is not None:
+                    from plugins import role_profiles
+                    role_profiles.attach_profile(sess.agent, target.stem, content)
+        for sess in affected:
+            self._persist_session(sess)
+        return {"name": target.stem, "content": content,
+                "sessionsUpdated": len(affected),
+                "builtin": target.stem.casefold() in _BUILTIN_ROLE_NAMES}
+    def delete_role_profile(self, name: Any) -> dict:
+        requested = self._valid_role_profile_name(name)
+        if requested is None:
+            raise ValueError("invalid role name")
+        path = self._role_profile_paths().get(requested.casefold())
+        if path is None:
+            raise FileNotFoundError("role profile not found")
+        with self.lock:
+            affected = [sess for sess in self.sessions.values()
+                        if (sess.role_name or "").casefold() == path.stem.casefold()]
+            if any(sess.status == "running" for sess in affected):
+                raise RoleProfileBusyError("role profile is in use by a running session")
+            path.unlink()
+            for sess in affected:
+                sess.role_name = None
+                if sess.agent is not None:
+                    from plugins import role_profiles
+                    role_profiles.deactivate_profile(sess.agent)
+        for sess in affected:
+            self._persist_session(sess)
+        return {"ok": True, "name": path.stem, "sessionsCleared": len(affected)}
+    def _session_role_name(self, sess: Session) -> Optional[str]:
+        agent_name = getattr(sess.agent, "_ga_role_profile_name", None) if sess.agent else None
+        if agent_name:
+            return agent_name
+        if not sess.role_name:
+            return None
+        try:
+            profile = self.get_role_profile(sess.role_name)
+        except (FileNotFoundError, ValueError):
+            return None
+        return profile["name"]
+
+    @staticmethod
+    def _sync_session_role_from_agent(sess: Session, agent: Any) -> None:
+        """Persist role changes made by a slash command in the chat transcript."""
+        name = getattr(agent, "_ga_role_profile_name", None)
+        sess.role_name = str(name) if name else None
+
+    def set_session_role(self, sid: str, name: Any = None, *, clear_context: bool = False) -> dict:
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            if sess.status == "running":
+                raise web.HTTPConflict(text=json.dumps({"error": "session is running"}, ensure_ascii=False), content_type="application/json")
+            selected = None
+            if name is not None and str(name).strip() and str(name).casefold() != "off":
+                profile = self.get_role_profile(name)
+                selected = profile["name"]
+            if sess.agent is not None:
+                from plugins import role_profiles
+                if selected:
+                    role_profiles.attach_profile(sess.agent, selected, profile["content"])
+                else:
+                    role_profiles.deactivate_profile(sess.agent)
+                if clear_context:
+                    role_profiles._clear_context(sess.agent)
+            elif clear_context:
+                # An explicit empty history prevents bridge restore from
+                # rebuilding model context from the retained UI transcript.
+                sess.llm_history = []
+            sess.role_name = selected
+            sess.updated_at = time.time()
+        self._persist_session(sess)
+        return {"ok": True, "sessionId": sid, "roleName": selected,
+                "cleared": bool(clear_context), "session": self.snapshot(sess, include_messages=False)}
 
     @staticmethod
     def _base_display_name(var: str, cfg: Optional[dict]) -> str:
@@ -683,6 +857,7 @@ class AgentManager:
             "pinned": sess.pinned,
             "untitled": sess.untitled,
             "model": self._live_model(sess),
+            "roleName": self._session_role_name(sess),
         }
         if include_messages:
             out["messages"] = list(sess.messages)
@@ -855,6 +1030,7 @@ class AgentManager:
                     return
                 sess.partial = None
                 full = strip_final_info_marker(full)
+                self._sync_session_role_from_agent(sess, agent)
                 import plan_state
                 plan_state.sync_plan_path_from_text(sess, full, sess.cwd or self.ga_root)
                 # 轨道2: 落库时带结构化全量轮(权威turn_segs),前端按轮渲染;content保留兜底
@@ -901,6 +1077,7 @@ class AgentManager:
                 "updatedAt": sess.updated_at,
                 "lastError": sess.last_error,
                 "model": self._live_model(sess),
+                "roleName": self._session_role_name(sess),
             }
 
     def plan_snapshot(self, sid: str) -> dict:
@@ -948,7 +1125,7 @@ class AgentManager:
         if no is not None and hasattr(agent, "next_llm"):
             with contextlib.suppress(Exception):
                 agent.next_llm(int(no))
-        if sess.llm_history:
+        if sess.llm_history is not None:
             try:
                 agent.llmclient.backend.history = sess.llm_history
             except Exception as e:
@@ -970,7 +1147,8 @@ class AgentManager:
         with self.lock:
             sess.agent = agent
             sess.status = "idle"
-        return {"ok": True, "sessionId": sid, "restored": True, "messageCount": len(sess.llm_history or sess.messages)}
+        restored_count = len(sess.llm_history) if sess.llm_history is not None else len(sess.messages)
+        return {"ok": True, "sessionId": sid, "restored": True, "messageCount": restored_count}
 
     def set_session_model(self, sid: str, llm_no: int) -> dict:
         """前端申请切换某会话的模型(唯一入口)。写 sess.llm_no(权威)并持久化;
@@ -1399,9 +1577,24 @@ async def ws_handler(request):
 # Transport layer: HTTP command/data API
 # ---------------------------------------------------------------------------
 
-def cors_headers():
+def _bridge_bind_host() -> str:
+    """The desktop bridge is a local control plane, never a network service."""
+    requested = os.environ.get("BRIDGE_HOST", "127.0.0.1").strip().casefold()
+    if requested not in {"", "127.0.0.1", "localhost", "::1"}:
+        print(f"[bridge] ignoring non-loopback BRIDGE_HOST={requested!r}", file=sys.stderr)
+    return "127.0.0.1"
+
+def _trusted_local_origin(request: web.Request) -> bool:
+    origin = request.headers.get("Origin", "").rstrip("/")
+    return not origin or origin in {"http://127.0.0.1:14168", "http://localhost:14168"}
+
+
+def cors_headers(request: web.Request) -> dict:
+    origin = request.headers.get("Origin", "").rstrip("/")
+    if not origin or not _trusted_local_origin(request):
+        return {}
     return {
-        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Origin": origin,
         "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
     }
@@ -1410,15 +1603,19 @@ def cors_headers():
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS":
-        return web.Response(status=204, headers=cors_headers())
+        if not _trusted_local_origin(request):
+            raise web.HTTPForbidden(text="cross-origin bridge access is not allowed")
+        return web.Response(status=204, headers=cors_headers(request))
+    if request.method not in {"GET", "HEAD"} and not _trusted_local_origin(request):
+        raise web.HTTPForbidden(text="cross-origin bridge access is not allowed")
     resp = await handler(request)
-    for k, v in cors_headers().items():
+    for k, v in cors_headers(request).items():
         resp.headers[k] = v
     return resp
 
 
 def json_ok(data: dict, status: int = 200):
-    return web.json_response(data, status=status, headers=cors_headers(), dumps=lambda x: json.dumps(x, ensure_ascii=False, default=str))
+    return web.json_response(data, status=status, dumps=lambda x: json.dumps(x, ensure_ascii=False, default=str))
 
 
 async def read_json(request) -> dict:
@@ -1530,6 +1727,35 @@ async def model_profiles_handler(request):
         return json_ok({"ok": False, "error": str(e)}, status=500)
 
 
+async def role_profiles_handler(request):
+    try:
+        name = request.match_info.get("name")
+        if request.method == "GET":
+            if name is not None:
+                return json_ok({"ok": True, "profile": manager.get_role_profile(name)})
+            return json_ok({"ok": True, "profiles": manager.list_role_profiles()})
+        data = await read_json(request)
+        if request.method == "POST":
+            profile = manager.save_role_profile(data.get("name"), data.get("content"), create=True)
+            return json_ok({"ok": True, "profile": profile}, status=201)
+        if request.method == "PUT":
+            profile = manager.save_role_profile(name, data.get("content"), create=False)
+            return json_ok({"ok": True, "profile": profile})
+        if request.method == "DELETE":
+            return json_ok(manager.delete_role_profile(name))
+    except RoleProfileBusyError as exc:
+        return json_ok({"ok": False, "error": str(exc)}, status=409)
+    except FileNotFoundError as exc:
+        return json_ok({"ok": False, "error": str(exc)}, status=404)
+    except FileExistsError as exc:
+        return json_ok({"ok": False, "error": str(exc)}, status=409)
+    except ValueError as exc:
+        return json_ok({"ok": False, "error": str(exc)}, status=400)
+    except Exception as exc:
+        return json_ok({"ok": False, "error": str(exc)}, status=500)
+    return json_ok({"ok": False, "error": "method not allowed"}, status=405)
+
+
 async def mixin_handler(request):
     """聚合渠道成员管理：POST 加入 / DELETE 移出 主聚合渠道。"""
     try:
@@ -1638,6 +1864,19 @@ async def session_model_handler(request):
         return json_ok(manager.set_session_model(sid, int(no)))
     except (TypeError, ValueError):
         return json_ok({"ok": False, "error": "invalid llmNo"}, status=400)
+
+
+async def session_role_handler(request):
+    sid = request.match_info["sid"]
+    data = await read_json(request)
+    clear_context = bool(data.get("clearContext", data.get("clear_context", False)))
+    try:
+        return json_ok(manager.set_session_role(sid, data.get("roleName", data.get("role_name")),
+                                                clear_context=clear_context))
+    except web.HTTPException:
+        raise
+    except (FileNotFoundError, ValueError) as exc:
+        return json_ok({"ok": False, "error": str(exc)}, status=400)
 
 
 async def plan_handler(request):
@@ -2145,6 +2384,11 @@ def create_app():
     app.router.add_get("/model-profiles/{id}", model_profiles_handler)
     app.router.add_put("/model-profiles/{id}", model_profiles_handler)
     app.router.add_delete("/model-profiles/{id}", model_profiles_handler)
+    app.router.add_get("/role-profiles", role_profiles_handler)
+    app.router.add_post("/role-profiles", role_profiles_handler)
+    app.router.add_get("/role-profiles/{name}", role_profiles_handler)
+    app.router.add_put("/role-profiles/{name}", role_profiles_handler)
+    app.router.add_delete("/role-profiles/{name}", role_profiles_handler)
     app.router.add_get("/sessions", list_sessions_handler)
     app.router.add_post("/session/new", new_session_handler)
     app.router.add_get("/session/{sid}", get_session_handler)
@@ -2156,6 +2400,7 @@ def create_app():
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/session/{sid}/restore", restore_handler)
     app.router.add_post("/session/{sid}/model", session_model_handler)
+    app.router.add_post("/session/{sid}/role", session_role_handler)
     app.router.add_post("/path/open", path_open_handler)
     app.router.add_post("/upload", upload_handler)
     app.router.add_delete("/upload", upload_delete_handler)
@@ -2204,7 +2449,7 @@ def create_app():
 
 
 if __name__ == "__main__":
-    host = os.environ.get("BRIDGE_HOST", "127.0.0.1")
+    host = _bridge_bind_host()
     port = int(os.environ.get("BRIDGE_PORT", "14168"))
     print(f"GenericAgent Web2 bridge: http://{host}:{port}  ws://{host}:{port}/ws", file=sys.stderr)
     web.run_app(create_app(), host=host, port=port, print=None)

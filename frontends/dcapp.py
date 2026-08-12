@@ -278,6 +278,9 @@ class DiscordApp(AgentChatMixin):
             return await self.send_text(chat_id, _handle_continue_frontend(ga, cmd), **ctx)
         if op == "/new":
             return await self.send_text(chat_id, _reset_conversation(ga), **ctx)
+        if op == "/role":
+            from plugins.role_profiles import handle_role_command
+            return await self.send_text(chat_id, handle_role_command(ga, cmd), **ctx)
         return await self.send_text(chat_id, HELP_TEXT, **ctx)
 
     async def run_agent(self, chat_id, text, **ctx):

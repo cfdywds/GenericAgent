@@ -143,6 +143,7 @@ _I18N: dict[str, dict[str, str]] = {
         'help.review':          '  /review [request]    In-session code review (report inline)',
         'help.rewind':          '  /rewind [n]          Rewind the last n rounds',
         'help.continue':        '  /continue [n|name]   List / restore historical sessions',
+        'help.role':            '  /role <name>|off     Switch role (--clear clears model context)',
         'help.new':             '  /new [name]          Start a new session (clears the current one)',
         'help.rename':          '  /rename <name>       Rename the current session',
         'help.clear':           '  /clear               Clear display (does not touch LLM history)',
@@ -315,6 +316,8 @@ _I18N: dict[str, dict[str, str]] = {
         # /workspace (parity with v2; backed by workspace_cmd.py)
         'cmd.workspace.arg':    '[path|off]',
         'cmd.workspace.desc':   'set working dir (abs path) and enter project mode',
+        'cmd.role.arg':         'list|<name>|off [--clear]',
+        'cmd.role.desc':        'switch role profile (--clear clears model context)',
         'ws.entered':           '✅ entered workspace「{n}」',
         'ws.fail':              '❌ workspace failed: {e}',
         'ws.exited':            'left workspace (project mode off; junction & files kept)',
@@ -410,6 +413,7 @@ _I18N: dict[str, dict[str, str]] = {
         'help.review':          '  /review [request]    in-session 代码审查（直接输出报告）',
         'help.rewind':          '  /rewind [n]          回退最近 n 轮',
         'help.continue':        '  /continue [n|name]   列出 / 恢复历史会话',
+        'help.role':            '  /role <角色名>|off    切换角色（--clear 清空旧模型上下文）',
         'help.new':             '  /new [name]          新建会话（清空当前会话）',
         'help.rename':          '  /rename <name>       重命名当前会话',
         'help.clear':           '  /clear               清空显示（不动 LLM 历史）',
@@ -582,6 +586,8 @@ _I18N: dict[str, dict[str, str]] = {
         # /workspace（与 v2 一致；后端 workspace_cmd.py）
         'cmd.workspace.arg':    '[path|off]',
         'cmd.workspace.desc':   '设定工作目录(绝对路径)并进入项目模式',
+        'cmd.role.arg':         'list|<角色名>|off [--clear]',
+        'cmd.role.desc':        '切换当前会话角色提示词（--clear 清空旧模型上下文）',
         'ws.entered':           '✅ 已进入 workspace「{n}」',
         'ws.fail':              '❌ workspace 设定失败: {e}',
         'ws.exited':            '已退出 workspace（项目模式关闭；junction 与文件保留）',
@@ -1911,6 +1917,7 @@ def _cmds() -> list[tuple[str, str, str]]:
         ('/continue', _t('cmd.continue.arg'),   _t('cmd.continue.desc')),
         ('/workspace', _t('cmd.workspace.arg', default='[path|off]'),
                        _t('cmd.workspace.desc', default='设定工作目录(绝对路径)并进入项目模式')),
+        ('/role',     _t('cmd.role.arg'),         _t('cmd.role.desc')),
         ('/new',      _t('cmd.new.arg'),        _t('cmd.new.desc')),
         ('/rename',   _t('cmd.rename.arg'),     _t('cmd.rename.desc')),
         ('/clear',    '',                       _t('cmd.clear.desc')),
@@ -4625,6 +4632,9 @@ class SB:
             self._show_menu(_t('continue.title'), options, _pick_session)
         elif name == 'workspace':
             self._cmd_workspace(arg)
+        elif name == 'role':
+            from plugins.role_profiles import handle_role_command
+            self.commit([handle_role_command(ag, raw)])
         elif name == 'clear':
             self._reset_session(ag)
             self.commit([_DIM + _t('msg.cleared') + _RST])
@@ -4947,6 +4957,7 @@ class SB:
                          _t('help.rewind'),
                          _t('help.resume'),
                          _t('help.continue'),
+                         _t('help.role'),
                          _t('help.new'),
                          _t('help.rename'),
                          _t('help.clear'),

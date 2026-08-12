@@ -9,8 +9,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from llmcore import reload_mykeys, ToolClient, MixinSession, NativeToolClient, NativeClaudeSession, NativeOAISession, resolve_client
 from agent_loop import agent_runner_loop
 try:
-    from plugins.hooks import discover_and_load; discover_and_load()
-except Exception: pass
+    from plugins import hooks as plugin_hooks
+    plugin_hooks.discover_and_load()
+except Exception:
+    plugin_hooks = None
 from ga import GenericAgentHandler, smart_format, get_global_memory, format_error, consume_file
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -134,6 +136,18 @@ class GenericAgent:
     # i know it is dangerous, but raw_query is dangerous enough it doesn't enlarge
     def _handle_slash_cmd(self, raw_query, display_queue):
         if not raw_query.startswith('/'): return raw_query
+        if plugin_hooks is not None:
+            try:
+                ctx = plugin_hooks.trigger('slash_command', {
+                    'agent': self, 'raw_query': raw_query, 'display_queue': display_queue,
+                })
+                if ctx.get('handled'):
+                    message = ctx.get('message')
+                    if message:
+                        display_queue.put({'done': message, 'source': 'system'})
+                    return None
+            except Exception:
+                pass
         if _sm := re.match(r'/session\.(\w+)=(.*)', raw_query.strip()):
             k, v = _sm.group(1), _sm.group(2)
             vfile = os.path.join(script_dir, 'temp', v)

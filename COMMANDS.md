@@ -28,6 +28,7 @@
 | 想清屏/重置当前对话 | `/clear` | 注意当前实现会重置会话；不是单纯 UI 清屏。 |
 | 想设置项目工作目录 | `/workspace <绝对路径>` 或 `/workspace off` | 进入/退出项目工作目录模式。 |
 | 想改界面语言或宠物动画 | `/language`、`/emoji` | UI 个性化设置。 |
+| 想切换当前会话的工作角色 | `/role list`、`/role <角色名> [--clear]`、`/role off` | 从角色提示词中选择；只影响当前会话；`--clear` 清空旧模型上下文，界面历史保留。 |
 | 想退出 | `/quit`、`/exit`、`/q` | 退出 TUI；核心 agent 队列还识别 `/exit`。 |
 
 ---
@@ -43,6 +44,7 @@
 - `/llm`
 - `/btw`
 - `/review`
+- `/role`
 - `/rewind`
 - `/continue`
 - `/workspace`
@@ -78,6 +80,8 @@
 - `/session.<属性>=<值>`：动态设置当前 LLM backend session 属性。
 - `/resume`：转换为“读取最近 model_responses 日志并总结可恢复会话”的提示词。
 - `/exit`：用于 agent 队列退出逻辑。
+- `/role list`、`/role <角色名> [--clear]`、`/role off [--clear]`：由自动加载的 `plugins/role_profiles.py` 管理当前 Agent 实例的角色提示词。
+  `--clear` 会清空 Agent 摘要历史、LLM backend history、工具缓存和当前 handler；不会删除界面历史或会话日志。
 
 ### 2.4 聊天/微信等简化前端命令
 
@@ -92,6 +96,7 @@
 - `/new`
 - `/btw`
 - `/review`
+- `/role`
 
 微信入口还会把普通消息加上文件展示提示；以 `/` 开头的文本会作为命令/任务进入处理链。
 
@@ -494,6 +499,75 @@ python agentmain.py --task task_name [--input "短任务"] [--llm_no N]
 
 **建议：**
 - 使用绝对路径，避免相对路径歧义。
+
+---
+
+### `/role list`、`/role <角色名> [--clear]`、`/role off [--clear]`
+
+为当前会话选择、替换或关闭角色提示词。角色提示词与全局系统提示词叠加，不会修改 `assets/sys_prompt.txt`、`assets/sys_prompt_en.txt` 或 `get_system_prompt()`。
+
+**用法：**
+
+```text
+/role list
+/role engineer
+/role reviewer --clear
+/role off
+```
+
+**内置角色：**
+
+- `engineer`：以代码、调用链、测试和最小可维护改动为中心。
+- `reviewer`：以缺陷、回归风险、安全性和测试缺口为中心；除非明确要求，不直接改代码。
+- `analyst`：先区分事实、推断和未知项，再给出结论与验证步骤。
+- `writer`：面向读者组织准确、简洁且可直接使用的技术说明。
+
+**行为：**
+
+- `/role list`：列出 `assets/roles/*.md` 中的可用角色及当前角色。
+- `/role <角色名>`：读取对应 Markdown 提示词，并只替换当前 `GenericAgent.extra_sys_prompts` 中由角色插件添加的条目；当前会话的其他附加提示词仍会保留。
+- `/role off`：移除当前会话的角色提示词。
+- 角色提示词与全局系统提示词、其他 `extra_sys_prompts` 以及 LLM backend 的附加提示词一起发送；切换角色不会覆盖全局系统提示词。
+- 角色名不区分大小写，实际可用名称以 `/role list` 输出为准。
+
+**`--clear`：**
+
+在角色名或 `off` 后加 `--clear`（也兼容 `-c`、`clear`）会清空旧模型上下文：Agent 摘要历史、所有 LLM backend history、工具缓存和当前 handler。界面历史和会话日志保留，便于审计，但不会重新注入已清空的模型上下文。
+
+**自定义角色：**
+
+在 `assets/roles/` 下新增 UTF-8 编码的 `.md` 文件，文件名（不含 `.md`）就是角色名。例如新增 `assets/roles/release_manager.md` 后执行：
+
+```text
+/role release_manager
+```
+
+角色 Markdown 内容应只写希望追加的角色规则；无需复制全局系统提示词。角色文件会在每次 `/role list` 或切换时重新读取，修改后可直接再次执行该命令生效。
+
+**桌面端管理：**
+
+桌面端左侧新增“角色”入口，可在界面中新增、编辑、删除 `assets/roles/*.md` 里的角色，无需手动打开项目目录或重启 bridge。进入页面后：
+
+- 点击“新增角色”，填写角色名和提示词并保存；角色名会自动对应为 `<角色名>.md`，不能包含 `\`、`/`、`:`、`*`、`?` 等文件名保留字符。
+- 点击某个角色的“启用”，只应用到当前打开的聊天会话；运行中的任务需先停止。
+- 勾选“切换后清空旧模型上下文”可达到 `/role <角色名> --clear` 的效果；界面消息保留。
+- 编辑已启用的角色后，所有当前使用该角色的空闲会话会立即加载新提示词；删除角色会自动关闭这些会话的角色提示词。若任一使用该角色的会话正在运行，编辑或删除会被拒绝，需先停止任务。
+
+这套界面与 `/role` 命令操作同一批角色文件，二者可以混用。
+
+**验证：**
+
+```text
+/role reviewer
+请审查当前工作区改动，只列出问题，按严重级别排序并给出文件行号。
+/role off
+```
+
+切换后应先返回“已切换角色: reviewer”；关闭后返回“已关闭角色提示词”。自动化回归可运行：
+
+```bash
+python -m pytest tests/test_role_profiles.py -q
+```
 
 ---
 

@@ -15,6 +15,7 @@ HELP_COMMANDS = (
     ("/continue [n]", "恢复第 n 个会话"),
     ("/btw <q>", "side question — 临时插问主 agent 进展，不打断主线"),
     ("/review [scope]", "in-session code review; 默认审当前 git diff"),
+    ("/role list|<name>|off [--clear]", "切换当前会话角色提示词；--clear 清空旧模型上下文（界面历史保留）"),
     ("/llm", "查看当前模型列表"),
     ("/llm [n]", "切换到第 n 个模型"),
 )
@@ -27,6 +28,7 @@ TELEGRAM_MENU_COMMANDS = (
     ("continue", "列出可恢复会话；/continue n 恢复第 n 个"),
     ("btw", "临时插问主 agent 进展，不打断主线"),
     ("review", "in-session code review；/review scope 指定范围"),
+    ("role", "列出/切换当前会话角色；--clear 清空旧模型上下文（界面历史保留）"),
     ("llm", "查看模型列表；/llm n 切换到指定模型"),
 )
 
@@ -309,6 +311,9 @@ class AgentChatMixin:
             return await self.send_text(chat_id, _handle_continue_frontend(self.agent, cmd), **ctx)
         if op == "/new":
             return await self.send_text(chat_id, _reset_conversation(self.agent), **ctx)
+        if op == "/role":
+            from plugins.role_profiles import handle_role_command
+            return await self.send_text(chat_id, handle_role_command(self.agent, cmd), **ctx)
         if op == "/btw":
             answer = await asyncio.to_thread(_handle_btw_frontend, self.agent, cmd)
             return await self.send_text(chat_id, answer, **ctx)

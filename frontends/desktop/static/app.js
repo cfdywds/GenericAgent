@@ -594,6 +594,7 @@ function gaGoPage(key) {
   renderSessionList();
   window.gaSetActiveFileComposer?.(key === 'collab' ? 'collab' : 'chat');
   if (key === 'collab') window.collabInit?.();
+  if (key === 'roles') void loadRoleProfiles();
 }
 window.gaGoPage = gaGoPage;
 nav.addEventListener('click', (e) => {
@@ -1529,6 +1530,7 @@ function postRenderEnhance(containerEl) {
 const state = {
   sessions: new Map(), activeId: null, bridgeReady: false,
   llmNo: 0, modelProfiles: [], modelName: null,
+  roleProfiles: [],
   conductorLlmNo: null, conductorModelName: null,
   runtime: new Map(),
   pendingFiles: [],
@@ -1559,7 +1561,8 @@ async function loadSessions() {
         id: s.id, bridgeSessionId: s.id, title: s.title,
         messages: [], untitled: s.untitled ?? true,
         pinned: s.pinned ?? false, lastActiveTs: s.updatedAt || s.createdAt,
-        llmNo: s.model && s.model.llmNo != null ? s.model.llmNo : null
+        llmNo: s.model && s.model.llmNo != null ? s.model.llmNo : null,
+        roleName: s.roleName || null
       });
     }
     // 刷新后固定恢复「上次正在看的会话」（前端持久化的 ga_active），而不是 bridge 的
@@ -2688,7 +2691,7 @@ function displayTitle(sess) {
 }
 async function newSession() {
   const localId = 'local-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-  const sess = { id: localId, bridgeSessionId: null, title: '', messages: [], untitled: true, lastActiveTs: Date.now() };
+  const sess = { id: localId, bridgeSessionId: null, title: '', messages: [], untitled: true, lastActiveTs: Date.now(), roleName: null };
   state.sessions.set(localId, sess);
   try {
     await ensureBridgeSession(sess);
@@ -2699,6 +2702,7 @@ async function newSession() {
   setActiveSession(sess.id);
   saveSessions();
   renderSessionList();
+  if (currentPage === 'roles') renderRoleManager();
 }
 function sessionNeedsHydrate(sess) {
   return !!(sess?.bridgeSessionId && state.bridgeReady && !sess.messages.length);
@@ -3006,6 +3010,7 @@ async function fetchSessionPoll(sess, opts = {}) {
 function applyPollResult(sess, result) {
   if (result.partial) upsert(sess, result.partial, true);
   for (const msg of (result.messages || [])) upsert(sess, msg, false);
+  syncSessionRole(sess, result);
   const busy = result.status === 'running' || !!result.partial;
   setBusy(sess, busy);
   if (isActive(sess)) {
@@ -3013,6 +3018,12 @@ function applyPollResult(sess, result) {
     applyLiveModel(result.model, sess);
   }
   return busy;
+}
+
+function syncSessionRole(sess, result) {
+  if (!sess || !Object.prototype.hasOwnProperty.call(result || {}, 'roleName')) return;
+  sess.roleName = result.roleName || null;
+  if (currentPage === 'roles') renderRoleManager();
 }
 
 /** 用后端运行态模型刷新 chip + 选择器。后端是权威:
@@ -3064,6 +3075,7 @@ async function hydrateSession(sess) {
     if (result.partial) upsert(sess, result.partial, true);
     const busy = result.status === 'running' || !!result.partial;
     setBusy(sess, busy);
+    syncSessionRole(sess, result);
     if (isActive(sess)) applyPlanPayload(sess, result.plan);
     if (busy && !rt(sess).polling) pollSession(sess);
   } catch (e) {
@@ -3871,6 +3883,155 @@ function renderSettingsModels() {
   }
   applyI18n();
 }
+
+/* ═══════════════ 角色管理 ═══════════════ */
+let editingRoleName = null;
+
+function roleProfileName(value) {
+  return String(value || '').trim();
+}
+
+function roleSessionLabel(sess) {
+  if (!sess) return t('role.noSession');
+  return sess.roleName || t('role.off');
+}
+
+function renderRoleManager() {
+  const list = document.getElementById('roles-list');
+  const empty = document.getElementById('roles-empty');
+  const sessionValue = document.getElementById('role-session-value');
+  const offBtn = document.getElementById('role-off-btn');
+  const sess = activeSess();
+  if (sessionValue) sessionValue.textContent = roleSessionLabel(sess);
+  if (offBtn) offBtn.disabled = !sess || !sess.roleName;
+  if (!list || !empty) return;
+  list.innerHTML = '';
+  const profiles = state.roleProfiles || [];
+  empty.hidden = profiles.length > 0;
+  for (const profile of profiles) {
+    const row = document.createElement('article');
+    const selected = sess && roleProfileName(sess.roleName).toLocaleLowerCase() === roleProfileName(profile.name).toLocaleLowerCase();
+    row.className = 'role-row' + (selected ? ' selected' : '');
+    row.innerHTML = `<div class="role-row-main"><div class="role-row-title">${escapeHtml(profile.name)}${profile.builtin ? `<span class="role-builtin">${escapeHtml(t('role.builtin'))}</span>` : ''}</div><div class="role-row-meta">${selected ? escapeHtml(t('role.active')) : escapeHtml(t('role.available'))}</div></div><div class="role-row-actions"><button type="button" class="role-use" data-act="use"${sess ? '' : ' disabled'}>${escapeHtml(selected ? t('role.active') : t('role.use'))}</button><button type="button" class="model-act" data-act="edit" title="${escapeHtml(t('common.edit'))}">${MODEL_ACT_EDIT}</button><button type="button" class="model-act model-act-del" data-act="delete" title="${escapeHtml(t('common.delete'))}">${MODEL_ACT_DEL}</button></div>`;
+    row.querySelector('[data-act="use"]').addEventListener('click', () => void setActiveSessionRole(profile.name));
+    row.querySelector('[data-act="edit"]').addEventListener('click', () => void openRoleEditor(profile.name));
+    row.querySelector('[data-act="delete"]').addEventListener('click', () => void deleteRoleProfile(profile.name));
+    list.appendChild(row);
+  }
+}
+
+async function loadRoleProfiles() {
+  try {
+    const res = await bridgeFetch('/role-profiles');
+    state.roleProfiles = res.profiles || [];
+    renderRoleManager();
+  } catch (ex) {
+    state.roleProfiles = [];
+    renderRoleManager();
+    showChanToast(t('err.roleLoad'), ex.message || '', 'err');
+  }
+}
+
+async function setActiveSessionRole(name) {
+  const sess = activeSess();
+  if (!sess || !sess.bridgeSessionId || rt(sess).busy) {
+    showToast(t(!sess ? 'role.noSession' : 'role.sessionBusy'));
+    return;
+  }
+  const clearContext = !!document.getElementById('role-clear-context')?.checked;
+  try {
+    const res = await bridgeFetch(`/session/${encodeURIComponent(sess.bridgeSessionId)}/role`, {
+      method: 'POST', body: { roleName: name, clearContext },
+    });
+    sess.roleName = res.roleName || null;
+    if (clearContext) {
+      // The bridge keeps UI history after a context reset. Retain the message
+      // cursor so the next poll does not append that retained history again.
+      const r = rt(sess);
+      r.lastId = Math.max(r.lastId, ...sess.messages.map(m => Number(m.id) || 0));
+    }
+    renderRoleManager();
+    showToast(name ? t('role.applied', { name: sess.roleName }) : t('role.disabled'));
+  } catch (ex) {
+    showChanToast(t('err.roleSwitch'), ex.message || '', 'err');
+  }
+}
+
+async function openRoleEditor(name) {
+  const form = document.getElementById('role-editor-form');
+  const nameInput = document.getElementById('role-name-input');
+  const promptInput = document.getElementById('role-prompt-input');
+  const title = document.getElementById('role-editor-title');
+  const err = document.getElementById('role-editor-err');
+  if (!form || !nameInput || !promptInput) return;
+  editingRoleName = null;
+  if (err) { err.hidden = true; err.textContent = ''; }
+  if (name) {
+    try {
+      const res = await bridgeFetch(`/role-profiles/${encodeURIComponent(name)}`);
+      const profile = res.profile || {};
+      editingRoleName = profile.name;
+      nameInput.value = profile.name || '';
+      nameInput.disabled = true;
+      promptInput.value = profile.content || '';
+      if (title) title.dataset.i18n = 'modal.editRole';
+    } catch (ex) {
+      showChanToast(t('err.roleLoad'), ex.message || '', 'err');
+      return;
+    }
+  } else {
+    form.reset();
+    nameInput.disabled = false;
+    if (title) title.dataset.i18n = 'modal.addRole';
+  }
+  applyI18n();
+  openModal('role-editor-modal');
+  setTimeout(() => (editingRoleName ? promptInput : nameInput).focus(), 30);
+}
+
+async function deleteRoleProfile(name) {
+  const confirmed = await showConfirmDialog({
+    title: t('common.delete'),
+    message: t('confirm.roleDelete', { name }),
+    okText: t('common.delete'), okKind: 'danger',
+  });
+  if (!confirmed) return;
+  try {
+    const res = await bridgeFetch(`/role-profiles/${encodeURIComponent(name)}`, { method: 'DELETE', body: {} });
+    const sess = activeSess();
+    if (sess && roleProfileName(sess.roleName).toLocaleLowerCase() === roleProfileName(name).toLocaleLowerCase()) sess.roleName = null;
+    await loadRoleProfiles();
+    if (res.sessionsCleared) showToast(t('role.deletedAndDisabled'));
+  } catch (ex) {
+    showChanToast(t('err.roleDelete'), ex.message || '', 'err');
+  }
+}
+
+bindClick('role-add-btn', () => void openRoleEditor());
+bindClick('role-off-btn', () => void setActiveSessionRole(null));
+const roleEditorForm = document.getElementById('role-editor-form');
+if (roleEditorForm) roleEditorForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const nameInput = document.getElementById('role-name-input');
+  const promptInput = document.getElementById('role-prompt-input');
+  const err = document.getElementById('role-editor-err');
+  const name = nameInput?.value?.trim() || '';
+  const content = promptInput?.value || '';
+  if (!name || !content.trim()) {
+    if (err) { err.textContent = t('err.roleRequired'); err.hidden = false; }
+    return;
+  }
+  try {
+    const path = editingRoleName ? `/role-profiles/${encodeURIComponent(editingRoleName)}` : '/role-profiles';
+    const res = await bridgeFetch(path, { method: editingRoleName ? 'PUT' : 'POST', body: { name, content } });
+    document.getElementById('role-editor-modal').hidden = true;
+    await loadRoleProfiles();
+    if (res.profile?.sessionsUpdated) showToast(t('role.savedAndUpdated'));
+  } catch (ex) {
+    if (err) { err.textContent = ex.message || t('err.roleSave'); err.hidden = false; }
+  }
+});
+
 function openSettings() {
   openModal('settings-modal');
   renderSettingsModels();

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>GenericAgent</title>
 <link rel="stylesheet" href="assets/fonts/fonts.css?v=2">
-<link rel="stylesheet" href="styles.css?v=186">
+<link rel="stylesheet" href="styles.css?v=187">
 <!-- KaTeX: LaTeX 公式渲染 -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <!-- highlight.js: 代码高亮 -->
@@ -77,6 +77,10 @@
         <a class="nav-item" data-page="token">
           <span class="ic" data-ga-icon="coins"></span>
           <span data-i18n="nav.token"></span>
+        </a>
+        <a class="nav-item" data-page="roles">
+          <span class="ic" data-ga-icon="usersThree"></span>
+          <span data-i18n="nav.roles"></span>
         </a>
       </nav>
 
@@ -399,6 +403,44 @@
           </div>
         </section>
 
+        <!-- 角色管理 -->
+        <section class="page" data-page="roles">
+          <div class="page-top">
+            <button type="button" class="pt-icon pt-sb-toggle" aria-label="toggle sidebar">
+              <span data-ga-icon="caretLeft"></span>
+            </button>
+            <span class="pt-spacer"></span>
+            <button type="button" class="pt-icon pt-rp-toggle" aria-label="toggle conversations">
+              <span data-ga-icon="caretRight"></span>
+            </button>
+          </div>
+          <div class="page-pad roles-page-pad">
+            <div class="roles-page-head">
+              <div>
+                <div class="page-title" data-i18n="page.roles.title"></div>
+                <div class="page-sub" data-i18n="page.roles.sub"></div>
+              </div>
+              <button type="button" class="set-btn roles-add-btn" id="role-add-btn">
+                <span data-ga-icon="plus"></span>
+                <span data-i18n="role.add"></span>
+              </button>
+            </div>
+            <div class="role-session-bar" id="role-session-bar">
+              <div class="role-session-copy">
+                <div class="role-session-label" data-i18n="role.currentSession"></div>
+                <div class="role-session-value" id="role-session-value"></div>
+              </div>
+              <label class="role-clear-option">
+                <input type="checkbox" id="role-clear-context">
+                <span data-i18n="role.clearContext"></span>
+              </label>
+              <button type="button" class="set-btn ghost" id="role-off-btn" data-i18n="role.off"></button>
+            </div>
+            <div class="roles-empty" id="roles-empty" hidden data-i18n="role.empty"></div>
+            <div class="roles-list" id="roles-list"></div>
+          </div>
+        </section>
+
       </div>
     </main>
 
@@ -683,6 +725,34 @@
       </div>
     </div>
   </div>
+
+  <!-- 角色编辑 -->
+  <div class="modal" id="role-editor-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card modal-card-wide role-editor-card" role="dialog" aria-modal="true" aria-labelledby="role-editor-title">
+      <div class="modal-head">
+        <div class="modal-title" id="role-editor-title" data-i18n="modal.addRole"></div>
+        <button class="modal-x" data-close data-i18n-title="common.close" title="">
+          <span data-ga-icon="x"></span>
+        </button>
+      </div>
+      <form class="modal-body role-editor-body" id="role-editor-form">
+        <label class="form-field">
+          <span data-i18n="role.name"></span>
+          <input id="role-name-input" name="name" type="text" maxlength="64" autocomplete="off" required data-i18n-ph="role.namePh">
+        </label>
+        <label class="form-field role-prompt-field">
+          <span data-i18n="role.prompt"></span>
+          <textarea id="role-prompt-input" name="content" maxlength="65536" required spellcheck="false" data-i18n-ph="role.promptPh"></textarea>
+        </label>
+        <div class="form-err" id="role-editor-err" hidden></div>
+        <div class="form-actions">
+          <button type="button" class="set-btn ghost" data-close data-i18n="common.cancel"></button>
+          <button type="submit" class="set-btn primary" data-i18n="common.save"></button>
+        </div>
+      </form>
+    </div>
+  </div>
 </div>
 
 <!-- 图片预览 lightbox -->
@@ -700,7 +770,7 @@
 <!-- highlight.js -->
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" crossorigin="anonymous"></script>
 <script src="phosphor-icons.js?v=2"></script>
-<script src="i18n.js?v=3"></script>
-<script src="app.js?v=221"></script>
+<script src="i18n.js?v=4"></script>
+<script src="app.js?v=223"></script>
 </body>
 </html>
