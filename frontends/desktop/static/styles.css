@@ -2666,3 +2666,49 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
   .page.page--chat-ui[data-page="collab"].collab-prog-open .collab-rail{ left:min(232px, 72vw); }
   .collab-prog-panel{ width:min(232px, 72vw); }
 }
+
+/* Web2 mobile layout - only for max-width:700px */
+@media (max-width:700px) {
+  /* Hide desktop sidebar and session bar */
+  .sidebar,
+  .rightpanel,
+  .sb-resize,
+  .rp-resize {
+    display: none !important;
+  }
+
+  /* Make chat main area take full 100dvh */
+  #app,
+  .body {
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .main {
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Chat shell and message area full height with touch scroll support */
+  .page.page--chat-ui .chat-shell,
+  .msg-area {
+    height: 100dvh;
+    max-height: 100dvh;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Bottom input box always visible and safe-area inset */
+  .composer {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* Ensure collapsed states don't affect mobile */
+  .body.sb-collapsed .sidebar,
+  .body.rp-collapsed .rightpanel {
+    display: none !important;
+  }
+
+  /* Do not override PC styles above 700px */
+}
