@@ -904,6 +904,131 @@ fn pick_directory(title: Option<String>) -> Option<String> {
     dlg.pick_folder().map(|p| p.to_string_lossy().into_owned())
 }
 
+#[cfg(windows)]
+fn set_clipboard_text(text: &str) -> Result<(), String> {
+    use std::ffi::c_void;
+    use std::ptr::null_mut;
+
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(hwnd: *mut c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(format: u32, mem: *mut c_void) -> *mut c_void;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut c_void;
+        fn GlobalLock(mem: *mut c_void) -> *mut c_void;
+        fn GlobalUnlock(mem: *mut c_void) -> i32;
+        fn GlobalFree(mem: *mut c_void) -> *mut c_void;
+    }
+
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = wide.len() * std::mem::size_of::<u16>();
+
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if mem.is_null() {
+            return Err("GlobalAlloc failed".into());
+        }
+
+        let ptr = GlobalLock(mem) as *mut u16;
+        if ptr.is_null() {
+            GlobalFree(mem);
+            return Err("GlobalLock failed".into());
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+        GlobalUnlock(mem);
+
+        let mut opened = false;
+        for attempt in 0..5 {
+            if OpenClipboard(null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            if attempt < 4 {
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+        if !opened {
+            GlobalFree(mem);
+            return Err("OpenClipboard failed".into());
+        }
+        if EmptyClipboard() == 0 {
+            CloseClipboard();
+            GlobalFree(mem);
+            return Err("EmptyClipboard failed".into());
+        }
+        if SetClipboardData(CF_UNICODETEXT, mem).is_null() {
+            CloseClipboard();
+            GlobalFree(mem);
+            return Err("SetClipboardData failed".into());
+        }
+
+        CloseClipboard();
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn set_clipboard_text(text: &str) -> Result<(), String> {
+    write_clipboard_command("pbcopy", &[], text)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn set_clipboard_text(text: &str) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        match write_clipboard_command("wl-copy", &[], text) {
+            Ok(()) => return Ok(()),
+            Err(e) => errors.push(e),
+        }
+    }
+    for (program, args) in [
+        ("xclip", &["-selection", "clipboard"][..]),
+        ("xsel", &["--clipboard", "--input"][..]),
+    ] {
+        match write_clipboard_command(program, args, text) {
+            Ok(()) => return Ok(()),
+            Err(e) => errors.push(e),
+        }
+    }
+    Err(format!("no clipboard command succeeded: {}", errors.join("; ")))
+}
+
+#[cfg(not(windows))]
+fn write_clipboard_command(program: &str, args: &[&str], text: &str) -> Result<(), String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{}: {}", program, e))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        std::io::Write::write_all(&mut stdin, text.as_bytes())
+            .map_err(|e| format!("{} stdin: {}", program, e))?;
+    }
+    let out = child.wait_with_output().map_err(|e| format!("{} wait: {}", program, e))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let detail = if err.is_empty() { String::new() } else { format!(": {}", err) };
+        Err(format!("{} exited with {}{}", program, out.status, detail))
+    }
+}
+
+#[tauri::command]
+fn copy_text(text: String) -> Result<(), String> {
+    set_clipboard_text(&text)
+}
+
 /// Stop the current bridge (ours or a stale one) and free :14168 before respawning.
 fn stop_current_bridge() {
     request_bridge_shutdown();
@@ -1117,7 +1242,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
-        .invoke_handler(tauri::generate_handler![start_bridge_with_config, start_bridge, get_config, export_mykey, pick_directory, get_ga_source, set_ga_source, clear_ga_source, move_ga_runtime, shortcut_should_ask, shortcut_decide, get_prepare_error])
+        .invoke_handler(tauri::generate_handler![start_bridge_with_config, start_bridge, get_config, export_mykey, pick_directory, copy_text, get_ga_source, set_ga_source, clear_ga_source, move_ga_runtime, shortcut_should_ask, shortcut_decide, get_prepare_error])
         .setup(move |app| {
             // Show the loading window immediately so the first-run prepare isn't a blank screen.
             // The window starts on loading.html (a local page), so no "connection refused" flash.

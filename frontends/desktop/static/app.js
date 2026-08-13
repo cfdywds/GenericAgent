@@ -389,6 +389,81 @@ function t(key, vars) {
   return text;
 }
 window.gaT = t;
+
+function clipboardErrorDetail(err) {
+  const msg = err && (err.message || String(err));
+  return msg && msg !== '[object Object]' ? msg : '';
+}
+
+function copyViaExecCommand(text) {
+  const doc = typeof document !== 'undefined' ? document : null;
+  if (!doc || typeof doc.execCommand !== 'function' || !doc.body) return false;
+  const ta = doc.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  ta.style.top = '0';
+  ta.style.opacity = '0';
+  doc.body.appendChild(ta);
+  const selection = typeof doc.getSelection === 'function' ? doc.getSelection() : null;
+  const ranges = [];
+  if (selection) {
+    for (let i = 0; i < selection.rangeCount; i += 1) ranges.push(selection.getRangeAt(i));
+  }
+  ta.focus();
+  ta.select();
+  let ok = false;
+  try {
+    ok = !!doc.execCommand('copy');
+  } finally {
+    ta.remove();
+    if (selection) {
+      selection.removeAllRanges();
+      ranges.forEach(r => selection.addRange(r));
+    }
+  }
+  return ok;
+}
+
+async function writeClipboardText(text, opts = {}) {
+  const value = String(text ?? '');
+  const win = typeof window !== 'undefined' ? window : {};
+  const nav = typeof navigator !== 'undefined' ? navigator : null;
+  const nativeInvoke = win.ga?.tauriInvoke || win.__TAURI__?.core?.invoke;
+  let lastErr = null;
+
+  if (typeof nativeInvoke === 'function' && win.__TAURI__?.core?.invoke) {
+    try {
+      await nativeInvoke('copy_text', { text: value });
+      return true;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  try {
+    if (copyViaExecCommand(value)) return true;
+  } catch (err) {
+    lastErr = err;
+  }
+
+  if (nav?.clipboard?.writeText) {
+    try {
+      await nav.clipboard.writeText(value);
+      return true;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  if (opts.toast !== false && typeof showChanToast === 'function') {
+    const title = typeof t === 'function' ? t('err.copy') : 'Copy failed';
+    showChanToast(title, clipboardErrorDetail(lastErr), 'err');
+  }
+  console.warn('[clipboard] copy failed', lastErr || '');
+  return false;
+}
 document.addEventListener('collab:running-count', e => {
   const b = document.getElementById('collab-badge');
   if (!b) return;
@@ -835,12 +910,12 @@ if (pqEl && pqToggle) {
   });
 }
 // 接入指引：复制获取 API Key 的链接
-bindClick('model-guide-copy', (e) => {
+bindClick('model-guide-copy', async (e) => {
   e.preventDefault(); e.stopPropagation();
   const link = document.getElementById('model-guide-link');
   const url = link ? link.href : '';
-  if (!url || !navigator.clipboard) return;
-  navigator.clipboard.writeText(url).then(() => showChanToast(t('guide.copied'), '', 'ok')).catch(() => {});
+  if (!url) return;
+  if (await writeClipboardText(url)) showChanToast(t('guide.copied'), '', 'ok');
 });
 bindClick('preset-btn',    (e) => { e.stopPropagation(); openModal('preset-modal'); });
 document.querySelectorAll('.modal').forEach(m =>
@@ -1484,10 +1559,10 @@ function postRenderEnhance(containerEl) {
       const btn = document.createElement('button');
       btn.className = 'code-copy-btn'; btn.innerHTML = SVG_COPY_ICON;
       btn.title = t('act.copy');
-      btn.onclick = () => {
-        navigator.clipboard.writeText(block.textContent).then(() => {
+      btn.onclick = async () => {
+        if (await writeClipboardText(block.textContent)) {
           btn.innerHTML = SVG_CHECK_ICON; setTimeout(() => btn.innerHTML = SVG_COPY_ICON, 1500);
-        });
+        }
       };
       block.parentElement.style.position = 'relative';
       block.parentElement.appendChild(btn);
@@ -1497,13 +1572,13 @@ function postRenderEnhance(containerEl) {
   containerEl.querySelectorAll('.code-block-copy').forEach(btn => {
     if (btn.dataset.bound) return;
     btn.dataset.bound = '1';
-    btn.onclick = () => {
+    btn.onclick = async () => {
       const code = btn.closest('.code-block').querySelector('code');
       if (!code) return;
-      navigator.clipboard.writeText(code.textContent.trim()).then(() => {
+      if (await writeClipboardText(code.textContent.trim())) {
         btn.textContent = '\u2713';
         setTimeout(() => { btn.textContent = '\u29C9'; }, 1500);
-      });
+      }
     };
   });
   // KaTeX 复制按钮
@@ -1514,10 +1589,10 @@ function postRenderEnhance(containerEl) {
     const btn = document.createElement('button');
     btn.className = 'latex-copy-btn'; btn.textContent = '\u29C9';
     btn.title = t('act.copyTex');
-    btn.onclick = () => {
-      navigator.clipboard.writeText(src.textContent).then(() => {
+    btn.onclick = async () => {
+      if (await writeClipboardText(src.textContent)) {
         btn.textContent = '\u2713'; setTimeout(() => btn.textContent = '\u29C9', 1500);
-      });
+      }
     };
     el.style.position = 'relative';
     el.appendChild(btn);
@@ -2221,15 +2296,15 @@ function msgNode(msg) {
     copyBtn.className = 'bubble-copy-btn';
     copyBtn.title = t('act.copy');
     copyBtn.innerHTML = SVG_COPY_ICON;
-    copyBtn.addEventListener('click', (e) => {
+    copyBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       const text = (msg.role === 'user')
         ? stripAttachPlaceholders((typeof msg.display === 'string' && msg.display.length) ? msg.display : (msg.content || ''))
         : assistantCopyText(msg);
-      navigator.clipboard.writeText(text).then(() => {
+      if (await writeClipboardText(text)) {
         copyBtn.innerHTML = SVG_CHECK_ICON;
         setTimeout(() => { copyBtn.innerHTML = SVG_COPY_ICON; }, 1500);
-      });
+      }
     });
     el.appendChild(copyBtn);
   }
@@ -2976,13 +3051,13 @@ function upsert(sess, raw, partial) {
       copyBtn.className = 'bubble-copy-btn';
       copyBtn.title = t('act.copy');
       copyBtn.innerHTML = SVG_COPY_ICON;
-      copyBtn.addEventListener('click', (e) => {
+      copyBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const text = assistantCopyText(m);
-        navigator.clipboard.writeText(text).then(() => {
+        if (await writeClipboardText(text)) {
           copyBtn.innerHTML = SVG_CHECK_ICON;
           setTimeout(() => { copyBtn.innerHTML = SVG_COPY_ICON; }, 1500);
-        });
+        }
       });
       r.draftEl.appendChild(copyBtn);
     }

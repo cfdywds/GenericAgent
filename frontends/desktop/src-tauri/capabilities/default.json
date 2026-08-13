@@ -19,6 +19,7 @@
     "allow-get-config",
     "allow-export-mykey",
     "allow-pick-directory",
+    "allow-copy-text",
     "allow-get-ga-source",
     "allow-set-ga-source",
     "allow-clear-ga-source",

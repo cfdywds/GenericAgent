@@ -24,6 +24,11 @@ description = "Pick a source directory via native folder dialog (import memory).
 commands.allow = ["pick_directory"]
 
 [[permission]]
+identifier = "allow-copy-text"
+description = "Copy text to the system clipboard from desktop UI actions."
+commands.allow = ["copy_text"]
+
+[[permission]]
 identifier = "allow-get-ga-source"
 description = "Read the user-set external GenericAgent source directory."
 commands.allow = ["get_ga_source"]
