@@ -52,7 +52,7 @@
   <div class="body">
 
     <!-- ① 左侧边栏 -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar" tabindex="-1">
       <div class="brand">
         <div class="brand-text">
           <div class="brand-name ga-wordmark">Generic Agent</div>
@@ -446,7 +446,7 @@
 
     <!-- ④ 右侧会话面板 -->
     <div class="rp-resize" id="rp-resize"></div>
-    <aside class="rightpanel" id="rightpanel">
+    <aside class="rightpanel" id="rightpanel" tabindex="-1">
       <div class="rp-head">
         <div class="search">
           <span class="search-ic" data-ga-icon="magnifyingGlass"></span>
@@ -475,6 +475,7 @@
         </div>
       </div>
     </aside>
+    <div class="mobile-drawer-scrim" id="mobile-drawer-scrim" aria-hidden="true"></div>
 
   </div>
 

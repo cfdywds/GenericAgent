@@ -2717,12 +2717,69 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
 
 /* Web2 mobile layout - only for max-width:700px */
 @media (max-width:700px) {
-  /* Hide desktop sidebar and session bar */
-  .sidebar,
-  .rightpanel,
+  /* Resize handles have no use once the panels become touch drawers. */
   .sb-resize,
   .rp-resize {
     display: none !important;
+  }
+
+  /* Keep both panels mounted as off-canvas drawers so the page-top controls
+     can reveal them on phones. */
+  .body .sidebar,
+  .body.sb-collapsed .sidebar,
+  .body .rightpanel,
+  .body.rp-collapsed .rightpanel {
+    display:flex !important;
+    position:fixed;
+    top:0;
+    bottom:0;
+    width:min(320px, calc(100vw - 48px));
+    max-width:calc(100vw - 48px);
+    min-height:100dvh;
+    padding:calc(var(--shell-pad) + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+    opacity:1;
+    pointer-events:none;
+    visibility:hidden;
+    overflow:hidden;
+    z-index:30;
+    box-shadow:0 16px 40px rgba(15, 23, 42, .24);
+    transition:transform .22s ease, visibility 0s linear .22s;
+  }
+  .body .sidebar,
+  .body.sb-collapsed .sidebar {
+    left:0;
+    right:auto;
+    transform:translateX(-100%);
+    border-right:1px solid var(--divider);
+  }
+  .body .rightpanel,
+  .body.rp-collapsed .rightpanel {
+    right:0;
+    left:auto;
+    transform:translateX(100%);
+    border-left:1px solid var(--divider);
+  }
+  .body.sb-mobile-open .sidebar,
+  .body.rp-mobile-open .rightpanel {
+    pointer-events:auto;
+    visibility:visible;
+    transform:translateX(0);
+    transition:transform .22s ease;
+  }
+  .mobile-drawer-scrim{
+    display:block;
+    position:fixed;
+    inset:0;
+    z-index:29;
+    background:rgba(15, 23, 42, .38);
+    opacity:0;
+    pointer-events:none;
+    transition:opacity .18s ease;
+  }
+  .body.sb-mobile-open .mobile-drawer-scrim,
+  .body.rp-mobile-open .mobile-drawer-scrim{
+    opacity:1;
+    pointer-events:auto;
   }
 
   /* Make chat main area take full 100dvh */
@@ -2752,11 +2809,7 @@ html[data-appearance="dark"] .bubble.md pre code{ color:var(--txt-2); }
     padding-bottom: env(safe-area-inset-bottom);
   }
 
-  /* Ensure collapsed states don't affect mobile */
-  .body.sb-collapsed .sidebar,
-  .body.rp-collapsed .rightpanel {
-    display: none !important;
-  }
-
-  /* Do not override PC styles above 700px */
+  /* A closed drawer points toward the panel it will reveal. */
+  .body:not(.sb-mobile-open) .pt-sb-toggle svg,
+  .body:not(.rp-mobile-open) .pt-rp-toggle svg{ transform:rotate(180deg); }
 }

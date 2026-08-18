@@ -1674,13 +1674,88 @@ const searchInput = document.querySelector('.search input');
 const rpResize   = document.getElementById('rp-resize');
 const rpPanel    = document.getElementById('rightpanel');
 const bodyEl     = document.querySelector('.body');
-/* 每个页面的 page-top 各自挂一对 hamburger / 会话 按钮(.pt-sb-toggle / .pt-rp-toggle),
-   全部绑同一个 toggle,效果跟以前的单一 sb-toggle/rp-toggle 一样,只是入口变成顶栏。 */
-document.querySelectorAll('.pt-sb-toggle').forEach(b => b.addEventListener('click', () => bodyEl.classList.toggle('sb-collapsed')));
-document.querySelectorAll('.pt-rp-toggle').forEach(b => b.addEventListener('click', () => bodyEl.classList.toggle('rp-collapsed')));
+const mainPanel  = document.querySelector('.main');
+const mobileDrawerScrim = document.getElementById('mobile-drawer-scrim');
+const mobileDrawerMedia = window.matchMedia('(max-width:700px)');
+let mobileDrawerTrigger = null;
+
+function usesMobileDrawers() {
+  return mobileDrawerMedia.matches;
+}
+
+function mobileDrawerPanel(panel) {
+  return panel === 'sidebar' ? sbPanel : rpPanel;
+}
+
+function focusMobileDrawer(panel) {
+  const openClass = panel === 'sidebar' ? 'sb-mobile-open' : 'rp-mobile-open';
+  window.setTimeout(() => {
+    if (usesMobileDrawers() && bodyEl.classList.contains(openClass)) mobileDrawerPanel(panel)?.focus();
+  }, 0);
+}
+
+function syncShellToggleAria() {
+  const mobile = usesMobileDrawers();
+  const sidebarOpen = mobile ? bodyEl.classList.contains('sb-mobile-open') : !bodyEl.classList.contains('sb-collapsed');
+  const sessionsOpen = mobile ? bodyEl.classList.contains('rp-mobile-open') : !bodyEl.classList.contains('rp-collapsed');
+  if (mainPanel) mainPanel.inert = mobile && (sidebarOpen || sessionsOpen);
+  document.querySelectorAll('.pt-sb-toggle').forEach(button => {
+    button.setAttribute('aria-controls', 'sidebar');
+    button.setAttribute('aria-expanded', String(sidebarOpen));
+  });
+  document.querySelectorAll('.pt-rp-toggle').forEach(button => {
+    button.setAttribute('aria-controls', 'rightpanel');
+    button.setAttribute('aria-expanded', String(sessionsOpen));
+  });
+}
+
+function closeMobileDrawers() {
+  const trigger = mobileDrawerTrigger;
+  const wasOpen = bodyEl.classList.contains('sb-mobile-open') || bodyEl.classList.contains('rp-mobile-open');
+  bodyEl.classList.remove('sb-mobile-open', 'rp-mobile-open');
+  syncShellToggleAria();
+  mobileDrawerTrigger = null;
+  if (wasOpen && trigger?.focus) window.setTimeout(() => trigger.focus(), 0);
+}
+
+function toggleShellPanel(panel, trigger) {
+  if (usesMobileDrawers()) {
+    const openClass = panel === 'sidebar' ? 'sb-mobile-open' : 'rp-mobile-open';
+    const otherClass = panel === 'sidebar' ? 'rp-mobile-open' : 'sb-mobile-open';
+    if (bodyEl.classList.contains(openClass)) {
+      closeMobileDrawers();
+      return;
+    }
+    mobileDrawerTrigger = trigger || document.activeElement;
+    bodyEl.classList.add(openClass);
+    bodyEl.classList.remove(otherClass);
+    syncShellToggleAria();
+    focusMobileDrawer(panel);
+    return;
+  } else {
+    bodyEl.classList.toggle(panel === 'sidebar' ? 'sb-collapsed' : 'rp-collapsed');
+  }
+  syncShellToggleAria();
+}
+
+document.querySelectorAll('.pt-sb-toggle').forEach(button => button.addEventListener('click', () => toggleShellPanel('sidebar', button)));
+document.querySelectorAll('.pt-rp-toggle').forEach(button => button.addEventListener('click', () => toggleShellPanel('sessions', button)));
+mobileDrawerScrim?.addEventListener('click', closeMobileDrawers);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && usesMobileDrawers()) closeMobileDrawers();
+});
+if (mobileDrawerMedia.addEventListener) mobileDrawerMedia.addEventListener('change', closeMobileDrawers);
+else mobileDrawerMedia.addListener(closeMobileDrawers);
+syncShellToggleAria();
 
 const sbResize = document.getElementById('sb-resize');
 const sbPanel  = document.querySelector('.sidebar');
+sbPanel?.addEventListener('click', event => {
+  if (usesMobileDrawers() && event.target.closest('.nav-item')) closeMobileDrawers();
+});
+convListEl?.addEventListener('click', event => {
+  if (usesMobileDrawers() && event.target.closest('.conv-item') && !event.target.closest('.ci-more')) closeMobileDrawers();
+});
 
 // 通用拖拽：dir=+1 拖动 →clientX 增大就增宽(左侧栏);dir=-1 反之(右侧)
 function bindResize(handle, panel, dir, min, max) {
@@ -2741,28 +2816,45 @@ function isAutoTitle(x) {
   if (/^agent-\d+$/i.test(s)) return true;  // 兼容上一轮误存的 agent-N
   return false;
 }
+function roleAwareTitle(sess, title) {
+  const roleName = String(sess?.roleName || '').trim();
+  return roleName ? `【${roleName}】${title}` : title;
+}
 function displayTitle(sess) {
-  if (sess && sess.title && !isAutoTitle(sess.title)) return sess.title;
-  const msgs = (sess && sess.messages) || [];
-  // 1) 优先:最后一段 assistant 文本里的 <summary>...</summary>
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (!m || m.role !== 'assistant') continue;
-    const txt = assistantStructuredText(m);
-    const sm = /<summary>([\s\S]*?)<\/summary>/i.exec(txt);
-    if (sm && sm[1].trim()) {
-      const line = sm[1].trim().split('\n')[0].trim();
-      if (line) return line.length > 60 ? line.slice(0, 60) + '…' : line;
+  let title = '';
+  if (sess && sess.title && !isAutoTitle(sess.title)) {
+    title = sess.title;
+  } else {
+    const msgs = (sess && sess.messages) || [];
+    // 1) 优先:最后一段 assistant 文本里的 <summary>...</summary>
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (!m || m.role !== 'assistant') continue;
+      const txt = assistantStructuredText(m);
+      const sm = /<summary>([\s\S]*?)<\/summary>/i.exec(txt);
+      if (sm && sm[1].trim()) {
+        const line = sm[1].trim().split('\n')[0].trim();
+        if (line) {
+          title = line.length > 60 ? line.slice(0, 60) + '…' : line;
+          break;
+        }
+      }
     }
+    // 2) 兜底:首条用户消息纯文本(去附件占位符)
+    if (!title) {
+      for (const m of msgs) {
+        if (!m || m.role !== 'user') continue;
+        const raw = typeof m.content === 'string' ? m.content : (m.display || '');
+        const clean = stripAttachPlaceholders(raw).trim();
+        if (clean) {
+          title = clean.length > 40 ? clean.slice(0, 40) + '…' : clean;
+          break;
+        }
+      }
+    }
+    if (!title) title = t('conv.defaultTitle');
   }
-  // 2) 兜底:首条用户消息纯文本(去附件占位符)
-  for (const m of msgs) {
-    if (!m || m.role !== 'user') continue;
-    const raw = typeof m.content === 'string' ? m.content : (m.display || '');
-    const clean = stripAttachPlaceholders(raw).trim();
-    if (clean) return clean.length > 40 ? clean.slice(0, 40) + '…' : clean;
-  }
-  return t('conv.defaultTitle');
+  return roleAwareTitle(sess, title);
 }
 async function newSession() {
   const localId = 'local-' + Date.now() + '-' + Math.random().toString(16).slice(2);
@@ -3097,7 +3189,10 @@ function applyPollResult(sess, result) {
 
 function syncSessionRole(sess, result) {
   if (!sess || !Object.prototype.hasOwnProperty.call(result || {}, 'roleName')) return;
-  sess.roleName = result.roleName || null;
+  const roleName = result.roleName || null;
+  const changed = sess.roleName !== roleName;
+  sess.roleName = roleName;
+  if (changed) renderSessionList();
   if (currentPage === 'roles') renderRoleManager();
 }
 
@@ -4019,6 +4114,7 @@ async function setActiveSessionRole(name) {
       method: 'POST', body: { roleName: name, clearContext },
     });
     sess.roleName = res.roleName || null;
+    renderSessionList();
     if (clearContext) {
       // The bridge keeps UI history after a context reset. Retain the message
       // cursor so the next poll does not append that retained history again.
@@ -4073,9 +4169,12 @@ async function deleteRoleProfile(name) {
   if (!confirmed) return;
   try {
     const res = await bridgeFetch(`/role-profiles/${encodeURIComponent(name)}`, { method: 'DELETE', body: {} });
-    const sess = activeSess();
-    if (sess && roleProfileName(sess.roleName).toLocaleLowerCase() === roleProfileName(name).toLocaleLowerCase()) sess.roleName = null;
+    const removedName = roleProfileName(name).toLocaleLowerCase();
+    for (const sess of state.sessions.values()) {
+      if (roleProfileName(sess.roleName).toLocaleLowerCase() === removedName) sess.roleName = null;
+    }
     await loadRoleProfiles();
+    renderSessionList();
     if (res.sessionsCleared) showToast(t('role.deletedAndDisabled'));
   } catch (ex) {
     showChanToast(t('err.roleDelete'), ex.message || '', 'err');
