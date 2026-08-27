@@ -2014,6 +2014,8 @@ fn bridge_command(python_path: &str, project_dir: &str) -> Result<Command, Boots
     cmd.arg(&script).current_dir(&dir);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     sanitize_bundle_env(&mut cmd, project_dir);
+    #[cfg(debug_assertions)]
+    cmd.env("GA_DESKTOP_DEV", "1");
     Ok(cmd)
 }
 

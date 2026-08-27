@@ -2132,6 +2132,8 @@ def _allowed_request_origins() -> Set[str]:
         f"http://localhost:{bridge_port}",
         f"http://[::1]:{bridge_port}",
     }
+    if os.environ.get("GA_DESKTOP_DEV") == "1":
+        origins.add("http://localhost:1430")
     if os.environ.get("GA_E2E") == "1":
         vite_port = os.environ.get("VITE_PORT", "")
         if re.fullmatch(r"[0-9]{1,5}", vite_port or ""):

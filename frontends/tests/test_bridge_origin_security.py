@@ -56,6 +56,7 @@ def test_evil_origins_are_rejected_before_sensitive_handlers(
     evil_origins = (
         "null",
         "https://localhost:5173",
+        "http://localhost:1430",
         "http://localhost:5174",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:14169",
@@ -82,11 +83,13 @@ def test_allowed_origins_are_reflected_exactly_without_credentials(
 ):
     monkeypatch.setenv("BRIDGE_PORT", "15168")
     monkeypatch.setenv("GA_E2E", "1")
+    monkeypatch.setenv("GA_DESKTOP_DEV", "1")
     monkeypatch.setenv("VITE_PORT", "5273")
     allowed = (
         "tauri://localhost",
         "http://tauri.localhost",
         "http://localhost:5173",
+        "http://localhost:1430",
         "http://127.0.0.1:15168",
         "http://localhost:15168",
         "http://[::1]:15168",
