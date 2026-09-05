@@ -10,6 +10,12 @@ The public React source of truth and the place for renderer issues, pull request
 - <https://github.com/abraxas914/GenericAgent>
 - Exact source used for this distribution:
   [`4a67226e18cb003db1210357ea4a283774773acc`](https://github.com/abraxas914/GenericAgent/commit/4a67226e18cb003db1210357ea4a283774773acc)
+  plus two local commits built from a fork checkout that carries them on top of
+  the recorded source commit:
+  [`879af2129acbd32f27478aec65ea1ad6182aa094`](https://github.com/abraxas914/GenericAgent/commit/879af2129acbd32f27478aec65ea1ad6182aa094)
+  ("fix(desktop): gate renderer readiness on bridge HTTP status") and
+  [`96faa6e49e6dce72adc2cb3f4671c517949fb331`](https://github.com/abraxas914/GenericAgent/commit/96faa6e49e6dce72adc2cb3f4671c517949fb331)
+  ("feat(desktop): per-session role selector in the composer").
 
 Over the two-month React Desktop 2.0 development cycle, [abraxas914](https://github.com/abraxas914) led the new
 renderer architecture and UI, Desktop bridge and Tauri integration, startup and recovery surfaces, package

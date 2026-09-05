@@ -3,8 +3,8 @@
 ## Goal
 
 Make the React Desktop 2.0 main chat page leave its `connecting` state once
-the local Desktop Bridge WebSocket is open and the Bridge has reported
-readiness.
+the local Desktop Bridge reports HTTP readiness, even when its optional
+WebSocket event channel is unavailable.
 
 ## Scope
 
@@ -28,17 +28,17 @@ readiness.
 
 The generated renderer currently represents the main chat page as `connecting`
 even though the local Bridge is healthy. The source renderer will treat the
-Bridge HTTP status and the Bridge WebSocket readiness event as the authoritative
-connection signals. A successful status response followed by an open WebSocket
-must transition the page state to `ready`; a closed socket must transition it
-back to `connecting` and retain the existing reconnect behavior.
+successful Bridge HTTP status response with `{ ok: true, ready: true }` as
+renderer readiness. The WebSocket remains an event-delivery channel and keeps
+its existing reconnect behavior, but its failure or closure must not replace an
+HTTP-confirmed `ready` state with `connecting`.
 
 The source-of-truth renderer repository will be checked out outside this
 repository at the recorded source commit. The regression test will exercise the
-real connection-state store with a local WebSocket server, asserting that an
-open Bridge connection changes the rendered state from `connecting` to `ready`.
-The minimal source change will be rebuilt through that repository's normal
-build process.
+real connection-state store with a failing WebSocket constructor and a
+successful mocked HTTP status response, asserting that the state changes from
+`connecting` to `ready`. The minimal source change will be rebuilt through that
+repository's normal build process.
 
 Only regenerated distribution files will be copied back. The current compiled
 distribution verifier will be updated with the new provenance and manifest
@@ -48,10 +48,11 @@ Bridge tests.
 ## Verification
 
 1. The new renderer test fails before the source fix because the state remains
-   `connecting` after the Bridge WebSocket opens.
+   `connecting` despite a healthy Bridge HTTP status response.
 2. The test passes after the source fix.
 3. `npm run test:dist` passes in `frontends/desktop` after importing the
    generated distribution and updating provenance.
 4. The Desktop Bridge tests pass.
 5. With the development launcher running, the main chat page displays the
-   connected state after the local Bridge and its WebSocket are available.
+   connected state after the local Bridge HTTP status endpoint reports ready,
+   regardless of the WebSocket event channel's state.
