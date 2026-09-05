@@ -162,6 +162,23 @@ class DesktopBridgeSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             startfile.assert_called_once_with(str(template.resolve()))
 
+    def test_dev_origins_include_both_loopback_spellings_only_in_dev(self):
+        with mock.patch.dict(os.environ, {"GA_DESKTOP_DEV": "1"}):
+            origins = desktop_bridge._allowed_request_origins()
+            self.assertIn("http://127.0.0.1:1430", origins)
+            self.assertIn("http://localhost:1430", origins)
+            for origin in ("http://127.0.0.1:1430", "http://localhost:1430"):
+                request = mock.Mock(headers={"Origin": origin, "Sec-Fetch-Site": "same-site"})
+                self.assertIsNone(desktop_bridge._request_origin_error(request))
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GA_DESKTOP_DEV", None)
+            origins = desktop_bridge._allowed_request_origins()
+            self.assertNotIn("http://127.0.0.1:1430", origins)
+            self.assertNotIn("http://localhost:1430", origins)
+            request = mock.Mock(headers={"Origin": "http://127.0.0.1:1430", "Sec-Fetch-Site": "same-site"})
+            self.assertEqual(desktop_bridge._request_origin_error(request), "request origin is not allowed")
+
 
 if __name__ == "__main__":
     unittest.main()

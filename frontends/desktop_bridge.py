@@ -2139,7 +2139,13 @@ def _allowed_request_origins() -> Set[str]:
         f"http://[::1]:{bridge_port}",
     }
     if os.environ.get("GA_DESKTOP_DEV") == "1":
-        origins.add("http://localhost:1430")
+        # `tauri dev` without a devUrl serves ../dist through the CLI's built-in
+        # static dev server on :1430; newer CLI builds bind 127.0.0.1 while the
+        # page may still be addressed as localhost, so allow both spellings.
+        origins.update({
+            "http://localhost:1430",
+            "http://127.0.0.1:1430",
+        })
     if os.environ.get("GA_E2E") == "1":
         vite_port = os.environ.get("VITE_PORT", "")
         if re.fullmatch(r"[0-9]{1,5}", vite_port or ""):
